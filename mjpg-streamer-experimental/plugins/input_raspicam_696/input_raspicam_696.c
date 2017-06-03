@@ -19,6 +19,7 @@
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA    #
 #                                                                              #
  *******************************************************************************/
+#include <unistd.h>  /* for sleep */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -49,6 +50,7 @@
 #include "mmal/util/mmal_default_components.h"
 #include "mmal/util/mmal_connection.h"
 #include "mmal/util/mmal_util.h"
+#include "overwrite_tif_tags.h"
 
 #include "RaspiCamControl.c"
 
@@ -91,6 +93,7 @@ typedef struct {
     unsigned char blob_yuv_max[3];
     unsigned int frame_no;
     MMAL_POOL_T* pool_ptr;
+    FILE* raw_fp;
 } Splitter_Callback_Data;
 
 static init_splitter_callback_data(Splitter_Callback_Data* p) {
@@ -102,8 +105,9 @@ static init_splitter_callback_data(Splitter_Callback_Data* p) {
     p->blob_yuv_max[0] = 0;
     p->blob_yuv_max[1] = 0;
     p->blob_yuv_max[2] = 0;
-    p->frame_no = 0;
+    p->frame_no = UINT_MAX; // encoder throws away 1st frame so we should too
     p->pool_ptr = NULL;
+    p->raw_fp = NULL;
 }
 
 /* private functions and variables to this plugin */
@@ -135,6 +139,7 @@ typedef struct
   FILE *file_handle; /// File handle to write buffer data to.
   VCOS_SEMAPHORE_T complete_semaphore; /// semaphore which is posted when we reach end of frame (indicates end of capture or fault)
   MMAL_POOL_T *pool; /// pointer to our state in case required in callback
+  Splitter_Callback_Data* splitter_data_ptr;
   uint32_t offset;
   unsigned int frame_no;
 } PORT_USERDATA;
@@ -463,8 +468,8 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
 {
    MMAL_BUFFER_HEADER_T *new_buffer;
    Splitter_Callback_Data *pData = (Splitter_Callback_Data*)port->userdata;
-   ++pData->frame_no;
-   fprintf(stderr, "splitter_buffer_callback: %u\n", pData->frame_no);
+   fprintf(stderr, "splitter: %u %lld %lld len= %d\n",
+           pData->frame_no, buffer->pts, vcos_getmicrosecs64(), buffer->length);
 
    /*
    if (pData != NULL) {
@@ -521,6 +526,7 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
 
    // release buffer back to the pool
    mmal_buffer_header_release(buffer);
+   ++pData->frame_no;
 
    // and send one back to the port (if still open)
    if (port->is_enabled)
@@ -546,7 +552,8 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
 
   // We pass our file handle and other stuff in via the userdata field.
   PORT_USERDATA *pData = (PORT_USERDATA *)port->userdata;
-  ++pData->frame_no;
+  fprintf(stderr, "encoder: %u %lld %lld len= %d flags= %x\n", pData->frame_no,
+          buffer->pts, vcos_getmicrosecs64(), buffer->length, buffer->flags);
 
   if (pData)
   {
@@ -561,28 +568,31 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
       if(pData->offset == 0)
         pthread_mutex_lock(&pglobal->in[plugin_number].db);
 
-#define TAG_FRAME_NO
-#ifdef TAG_FRAME_NO
-      unsigned int frame_no = pData->frame_no;
+#define SEND_BBOXES
+#ifdef SEND_BBOXES
       if (buffer->data[0] == 0xff &&
           buffer->data[1] == 0xd8 &&
-          buffer->data[46] == 0x01 &&
-          buffer->data[47] == 0x10) {
+          buffer->data[2] == 0xff &&
+          buffer->data[3] == 0xe1) {
 
-          /* Replace the existing 0x0110 exif tag (equipment model name) with
-             the following 0x9211 exif tag (image number). */
-          buffer->data[46] = 0x92;
-          buffer->data[47] = 0x11;
-          buffer->data[48] = 0x00;  // type 0x0004 means 4 byte integer
-          buffer->data[49] = 0x04;
-          buffer->data[50] = 0x00;  // 0x00000001 count of 4 byte integers = 1
-          buffer->data[51] = 0x00;
-          buffer->data[52] = 0x00;
-          buffer->data[53] = 0x01;
-          buffer->data[54] = 0xff & (frame_no >> 24);
-          buffer->data[55] = 0xff & (frame_no >> 16);
-          buffer->data[56] = 0xff & (frame_no >> 8);
-          buffer->data[57] = 0xff & frame_no;
+          /* Send the bounding boxes in the image packets by overwriting the
+             tiff tags in the header supplied by Broadcom. */
+
+          unsigned int cols = port->format->es->video.height;
+          unsigned int rows = port->format->es->video.width;
+          const unsigned int SIZE_FIELD_OFFSET = 4;
+          unsigned int total_header_bytes = SIZE_FIELD_OFFSET +
+                      (((unsigned int)buffer->data[4] << 8) | buffer->data[5]);
+          const unsigned int TIFF_TAGS_OFFSET = 12;
+
+          /* For now, fake up 21 bboxes. */
+
+          unsigned short bbox[84];
+          int ii;
+          for (ii = 0; ii < 84; ++ii) {
+            bbox[ii] = ii;
+          }
+          overwrite_tif_tags(cols, rows, 84, bbox, buffer->data);
       }
 #endif
 #ifdef DSC
@@ -598,6 +608,7 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
                 fprintf(debug_fp, " %02x", buffer->data[ii + 4]);
             }
             fprintf(debug_fp, "\n");
+            fflush(debug_fp);
         }
       }
 #endif
@@ -624,6 +635,7 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
       complete = 1;
 
       pData->offset = 0;
+      ++pData->frame_no;
       /* signal fresh_frame */
       pthread_cond_broadcast(&pglobal->in[plugin_number].db_update);
       pthread_mutex_unlock(&pglobal->in[plugin_number].db);
@@ -680,6 +692,7 @@ static void camera_control_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
 {
   if (buffer->cmd == MMAL_EVENT_PARAMETER_CHANGED)
   {
+    fprintf(stderr, "camera_control\n");
   }
   else
   {
@@ -1385,6 +1398,7 @@ void *worker_thread(void *arg)
   callback_data.pool = pool;
   callback_data.offset = 0;
   callback_data.frame_no = 0;
+  callback_data.splitter_data_ptr = &splitter_callback_data;
 
   vcos_assert(vcos_semaphore_create(&callback_data.complete_semaphore, "RaspiStill-sem", 0) == VCOS_SUCCESS);
 
