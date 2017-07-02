@@ -8,7 +8,7 @@ if("${CMAKE_BUILD_TYPE}" STREQUAL "")
   SET(CMAKE_BUILD_TYPE "Release")
 endif()
 
-SET(COMPILE_DEFINITIONS -Werror -Wall)
+SET(COMPILE_DEFINITIONS -g -Werror -Wall)
 
 include(CheckLibraryExists) 
 include(CheckIncludeFiles)

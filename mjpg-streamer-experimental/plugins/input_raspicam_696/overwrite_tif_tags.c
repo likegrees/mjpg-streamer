@@ -53,7 +53,6 @@ int overwrite_tif_tags(unsigned int cols,
                       unsigned short bbox_coord_count, 
                       unsigned short bbox_coord[],
                       unsigned char* buf) {
-    printf("cols= %d rows= %d\n", cols, rows);
 
     /* Check the 1st four bytes to make sure this is a JPEG header. */
 

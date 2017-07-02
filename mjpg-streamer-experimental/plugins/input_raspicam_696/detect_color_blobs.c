@@ -160,6 +160,26 @@ typedef struct {
 
 
 /**
+ * @brief Set p->root_list[rx] to point at bx.
+ *
+ * And set p->blob_set[bx] to point to rx.  Every time an entry of
+ * p->root_list is changed, it should be done via this routine in order to
+ * insure consistency of these two fields.
+ *
+ * If used_root_list_count is growing (or shrinking), this change should be
+ * made before this routine is called, or the assertions may fail.
+ */
+static void set_root_list_entry(Blob_List* p,
+                                Root_List_Index rx,
+                                Blob_Set_Index bx) {
+    assert(rx < p->used_root_list_count);
+    assert(bx < p->used_blob_set_count);
+    p->root_list[rx] = bx;
+    p->blob_set[bx].root_list_index = rx;
+}
+
+
+/**
  * @brief Start a new blob consisting of a single Blob_Set_Entry.
  *
  * @param p [in,out]       Pointer to the Blob_List.  The new blob is added to
@@ -180,22 +200,21 @@ static Blob_Set_Index make_set(Blob_List* p,
 
     /* Create a new root_list entry. */
 
-    Blob_Set_Index new_root_list_index = p->used_root_list_count++;
+    Root_List_Index new_root_list_index = p->used_root_list_count++;
 
     /* Create and initialize a new blob_set entry. */
 
-    Blob_Set_Entry* new_entry_ptr = &p->blob_set[p->used_blob_set_count];
-    new_entry_ptr->root_list_index = new_root_list_index;
-    new_entry_ptr->parent_index = p->used_blob_set_count; // self pointer
+    Blob_Set_Index new_blob_set_index = p->used_blob_set_count++;
+    Blob_Set_Entry* new_entry_ptr = &p->blob_set[new_blob_set_index];
+    new_entry_ptr->parent_index = new_blob_set_index; // self pointer
     new_entry_ptr->rank = 0;
     stats_init(&new_entry_ptr->stats, row, yuv_run_ptr->run_low,
                yuv_run_ptr->run_high);
 
     /* Add the new Blob_Set_Entry to the root_list. */
 
-    p->root_list[new_root_list_index] = new_entry_ptr->parent_index;
-    ++p->used_blob_set_count;
-    return new_entry_ptr->parent_index;
+    set_root_list_entry(p, new_root_list_index, new_blob_set_index);
+    return new_blob_set_index;
 }
 
 
@@ -207,19 +226,16 @@ static Blob_Set_Index make_set(Blob_List* p,
  * @param delete_this_entry [in] The value of the entry to delete.
  */
 static void delete_root_list_entry(Blob_List* p, 
-                                   Blob_Set_Index delete_this_entry) {
+                                   Blob_Set_Index ix) {
     /* Find the root_list entry with value delete_this_entry. */
 
-    Root_List_Index ix = p->blob_set[delete_this_entry].root_list_index;
     assert(ix < p->used_root_list_count);
-    assert(p->root_list[ix] == delete_this_entry);
 
     /* Overwrite it with the last entry. */
 
-    Root_List_Index last_entry = --p->used_root_list_count;
-    Blob_Set_Index bx = p->root_list[last_entry];
-    p->root_list[ix] = bx;
-    p->blob_set[bx].root_list_index = ix;
+    Root_List_Index last_root_list_index = --p->used_root_list_count;
+    Blob_Set_Index last_blob_set_index = p->root_list[last_root_list_index];
+    set_root_list_entry(p, ix, last_blob_set_index);
 }
 
 
@@ -238,9 +254,15 @@ static void set_parent(Blob_List* p,
     assert(child_index < p->used_blob_set_count);
     assert(new_parent_index < p->used_blob_set_count);
     Blob_Set_Entry* child_ptr = &p->blob_set[child_index];
-    child_ptr->parent_index = new_parent_index;
-    stats_add(&p->blob_set[new_parent_index].stats, &child_ptr->stats);
-    delete_root_list_entry(p, child_index);
+    if (child_ptr->parent_index != child_index) {
+        child_ptr->parent_index = new_parent_index;
+        stats_add(&p->blob_set[new_parent_index].stats, &child_ptr->stats);
+        Root_List_Index rx = child_ptr->root_list_index;
+        if (rx != NOT_A_ROOT_LIST_INDEX) {
+            delete_root_list_entry(p, rx);
+            child_ptr->root_list_index = NOT_A_ROOT_LIST_INDEX;
+        }
+    }
 }
 
 
@@ -338,6 +360,7 @@ static void yuv_run_union(Blob_List* p,
             Yuv_Run* swap_tmp2 = a;
             a = b;
             b = swap_tmp2;
+            assert(a_parent != 0);
         }
         // Now we know a_parent is not 0.
         if (b_parent == 0) {
@@ -590,34 +613,68 @@ void shell_sort_blobs_by_pixel_count(Blob_List* p) {
             int j = i;
             Blob_Set_Index temp_arr = arr[i];
             while (j >= inc && is_less(p, arr[j - inc], temp_arr)) {
-                arr[j] = arr[j - inc];
+                set_root_list_entry(p, j, arr[j - inc]);
                 j -= inc;
             }
-            arr[j] = temp_arr;
+            set_root_list_entry(p, j, temp_arr);
         }
     }
 }
 
 
+unsigned int blob_list_purge_small_bboxes(Blob_List* p,
+                                          unsigned int min_pixels_per_blob) {
+    /* Count the number of large blobs at the start of the root_list. */
+
+    Blob_Set_Index* arr = p->root_list;
+    int ok_count;
+    for (ok_count = 0; ok_count < p->used_root_list_count; ++ok_count) {
+        Blob_Set_Index ii = arr[ok_count];
+        Blob_Stats* s = &p->blob_set[ii].stats;
+        if (s->count < min_pixels_per_blob) break;
+    }
+    if (ok_count < p->used_root_list_count) {
+        int test_index = ok_count;
+        while (test_index < p->used_root_list_count) {
+            Blob_Set_Index ii = arr[test_index];
+            Blob_Stats* s = &p->blob_set[ii].stats;
+            if (s->count >= min_pixels_per_blob) {
+                set_root_list_entry(p, ok_count, ii);
+                ++ok_count;
+            }
+            ++test_index;
+        }
+    }
+    printf("removed %d small blobs\n", p->used_root_list_count - ok_count);
+    p->used_root_list_count = ok_count;
+    return ok_count;
+}
+
+
+
 unsigned int copy_best_bounding_boxes(Blob_List* p,
-                                      unsigned int min_pixels_per_blob,
                                       int bbox_element_count,
                                       unsigned short bbox_element[]) {
     int i;
     int k = 0;
-    shell_sort_blobs_by_pixel_count(p);
+    printf("BEFORE\n");
     for (i = 0; i < p->used_root_list_count; ++i) {
         Blob_Set_Index ii = p->root_list[i];
         Blob_Stats* s = &p->blob_set[ii].stats;
         printf("pix_count= %u\n", s->count);
-        if (s->count >= min_pixels_per_blob) {
-            bbox_element[k*4+0] = s->min_x;
-            bbox_element[k*4+1] = s->min_y;
-            bbox_element[k*4+2] = s->max_x;
-            bbox_element[k*4+3] = s->max_y;
-            ++k;
-            if (k >= bbox_element_count / 4) break;
-        }
+    }
+    shell_sort_blobs_by_pixel_count(p);
+    printf("AFTER\n");
+    for (i = 0; i < p->used_root_list_count; ++i) {
+        Blob_Set_Index ii = p->root_list[i];
+        Blob_Stats* s = &p->blob_set[ii].stats;
+        printf("pix_count= %u\n", s->count);
+        bbox_element[k*4+0] = s->min_x;
+        bbox_element[k*4+1] = s->min_y;
+        bbox_element[k*4+2] = s->max_x;
+        bbox_element[k*4+3] = s->max_y;
+        ++k;
+        if (k >= bbox_element_count / 4) break;
     }
     return k * 4;
 }

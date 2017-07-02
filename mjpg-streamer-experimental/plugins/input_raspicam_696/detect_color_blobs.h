@@ -74,6 +74,7 @@ extern "C" {
 typedef unsigned short Blob_Set_Index;
 
 /** Index into the root_list array of a Blob_List. */
+#define NOT_A_ROOT_LIST_INDEX USHRT_MAX
 typedef unsigned short Root_List_Index;
 
 /**
@@ -103,8 +104,8 @@ typedef struct {
 typedef struct {
     /** If this is a root, stats contains a description of the entire blob. */
     Blob_Stats stats;
-    Blob_Set_Index parent_index;     /// index into blob_set array of Blob_List
-    Root_List_Index root_list_index; /// index into root_list array of Blob_List
+    Blob_Set_Index parent_index;     /// index into blob_set array
+    Root_List_Index root_list_index; /// index into root_list array
     /** Approximates the log of the number of items rooted at this node. */
     unsigned short rank;
 } Blob_Set_Entry;
@@ -266,8 +267,10 @@ static inline const Blob_Stats* get_blob_stats(const Blob_List* p, int i) {
  */
 void shell_sort_blobs_by_pixel_count(Blob_List* p);
 
+unsigned int blob_list_purge_small_bboxes(Blob_List* p,
+                                          unsigned int min_pixels_per_blob);
+
 unsigned int copy_best_bounding_boxes(Blob_List* p,
-                                      unsigned int min_pixels_per_blob,
                                       int bbox_element_count,
                                       unsigned short bbox_element[]);
 

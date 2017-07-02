@@ -96,6 +96,10 @@ typedef struct {
     MMAL_POOL_T* pool_ptr;
     FILE* raw_fp;
     Blob_List blob_list;
+    pthread_mutex_t bbox_mutex;
+#define MAX_BBOXES 20
+    unsigned short bbox_element_count;
+    unsigned short bbox_element[MAX_BBOXES * 4];
 } Splitter_Callback_Data;
 
 static init_splitter_callback_data(Splitter_Callback_Data* p) {
@@ -110,6 +114,8 @@ static init_splitter_callback_data(Splitter_Callback_Data* p) {
     p->frame_no = UINT_MAX; // encoder throws away 1st frame so we should too
     p->pool_ptr = NULL;
     p->raw_fp = NULL;
+    p->bbox_element_count = 0;
+    pthread_mutex_init(&p->bbox_mutex, NULL);
 }
 
 /* private functions and variables to this plugin */
@@ -472,43 +478,51 @@ void log_mmal_status(MMAL_STATUS_T status)
  * @param buffer mmal buffer header pointer
  */
 static void splitter_buffer_callback(MMAL_PORT_T *port,
-                                     MMAL_BUFFER_HEADER_T *buffer)
-{
-   MMAL_BUFFER_HEADER_T *new_buffer;
-   Splitter_Callback_Data *pData = (Splitter_Callback_Data*)port->userdata;
-   fprintf(stderr, "splitter: %u %lld %lld %lld len= %d\n",
-           pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length);
+                                     MMAL_BUFFER_HEADER_T *buffer) {
+    MMAL_BUFFER_HEADER_T *new_buffer;
+    Splitter_Callback_Data *pData = (Splitter_Callback_Data*)port->userdata;
+    fprintf(stderr, "splitter: %u %lld %lld %lld len= %d\n",
+            pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length);
 
-   if (pData != NULL) {
-      mmal_buffer_header_mem_lock(buffer);
-      if (pData->detect_yuv) {
-         detect_color_blobs(&pData->blob_list, pData->blob_yuv_min[0],
-                            pData->blob_yuv_min[1], pData->blob_yuv_max[1],
-                            pData->blob_yuv_min[2], pData->blob_yuv_max[2],
-                            false, port->format->es->video.width,
-                            port->format->es->video.height, buffer->data);
-      }
-      mmal_buffer_header_mem_unlock(buffer);
-   } else {
-      LOG_ERROR("Received a camera buffer callback with no state");
-   }
+    if (pData != NULL) {
+        mmal_buffer_header_mem_lock(buffer);
+        if (pData->detect_yuv) {
+            detect_color_blobs(&pData->blob_list, pData->blob_yuv_min[0],
+                    pData->blob_yuv_min[1], pData->blob_yuv_max[1],
+                    pData->blob_yuv_min[2], pData->blob_yuv_max[2],
+                    false, port->format->es->video.width,
+                    port->format->es->video.height, buffer->data);
+#define MIN_PIXELS_PER_BLOB 30
+            (void)blob_list_purge_small_bboxes(&pData->blob_list,
+                                               MIN_PIXELS_PER_BLOB);
+            pthread_mutex_lock(&pData->bbox_mutex);
+            pData->bbox_element_count =
+                    copy_best_bounding_boxes(&pData->blob_list, MAX_BBOXES * 4,
+                                             pData->bbox_element);
+            pthread_mutex_unlock(&pData->bbox_mutex);
+            printf("bbox_element_count= %d\n", pData->bbox_element_count);
+        }
+        mmal_buffer_header_mem_unlock(buffer);
+    } else {
+        LOG_ERROR("Received a camera buffer callback with no state");
+    }
 
-   // release buffer back to the pool
-   mmal_buffer_header_release(buffer);
-   ++pData->frame_no;
+    // release buffer back to the pool
+    mmal_buffer_header_release(buffer);
+    ++pData->frame_no;
 
-   // and send one back to the port (if still open)
-   if (port->is_enabled)
-   {
-      MMAL_STATUS_T status;
-      new_buffer = mmal_queue_get(pData->pool_ptr->queue);
-      if (new_buffer) {
-         status = mmal_port_send_buffer(port, new_buffer);
-      }
-      if (!new_buffer || status != MMAL_SUCCESS) {
-         LOG_ERROR("Unable to return a buffer to the splitter port");
-      }
-   }
+    // and send one back to the port (if still open)
+    if (port->is_enabled)
+    {
+        MMAL_STATUS_T status;
+        new_buffer = mmal_queue_get(pData->pool_ptr->queue);
+        if (new_buffer) {
+            status = mmal_port_send_buffer(port, new_buffer);
+        }
+        if (!new_buffer || status != MMAL_SUCCESS) {
+            LOG_ERROR("Unable to return a buffer to the splitter port");
+        }
+    }
 }
 
 
@@ -553,23 +567,12 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
           unsigned int total_header_bytes = SIZE_FIELD_OFFSET +
                       (((unsigned int)buffer->data[4] << 8) | buffer->data[5]);
           const unsigned int TIFF_TAGS_OFFSET = 12;
-
-          unsigned short bbox[84];
-          unsigned short bbox_count = 0;
-          if (pData->splitter_data_ptr->detect_yuv) {
-              bbox_count = copy_best_bounding_boxes(
-                                       &pData->splitter_data_ptr->blob_list,
-                                       20, 84, bbox);
-          } else {
-              /* For now, fake up 21 bboxes. */
-
-              int ii;
-              for (ii = 0; ii < 84; ++ii) {
-                bbox[ii] = ii;
-              }
-              bbox_count = 84;
-          }
-          overwrite_tif_tags(cols, rows, 84, bbox, buffer->data);
+          pthread_mutex_lock(&pData->splitter_data_ptr->bbox_mutex);
+          overwrite_tif_tags(cols, rows,
+                             pData->splitter_data_ptr->bbox_element_count,
+                             pData->splitter_data_ptr->bbox_element,
+                             buffer->data);
+          pthread_mutex_unlock(&pData->splitter_data_ptr->bbox_mutex);
       }
 #endif
 #ifdef DSC
