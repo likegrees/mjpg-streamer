@@ -48,31 +48,74 @@
  *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/**
- * @brief Overwrite the existing tiff headers with Team 696 bounding box
- *        information.
- *
- * @param cols [in]             The number of columns in the image.
- * @param rows [in]             The number of rows in the image.
- * @param bbox_coord_count [in] The number of elements in the bbox_coord array.
- *                              This is truncated down in this routine to fit
- *                              in the available space, and to be a multiple of
- *                              four.
- * @param bbox_coord [in]       The bounding box coordinates.  Each bounding
- *                              box requires 4 coordinates in this order:
- *                              x_min, y_min, x_max, y_max.
- * @param buf [in,out]          Points to the start of the JPEG header.  The
- *                              size of the header is encoded in the header
- *                              itself.  This routine writes over the TIF tags
- *                              portion of the header with the supplied
- *                              bounding box info.
- * @return On success, the number of bbox_coords actually written.  This may
- *         be less than bbox_coord.  On failure, -1.  Failure occurs if
- *         buf does not point to a valid JPEG header, or if there is not
- *         enough space in the header to hold the minimal set of TIF tags.
- */
-int overwrite_tif_tags(unsigned int cols,
-                       unsigned int rows,
-                       unsigned short bbox_coord_count,
-                       unsigned short bbox_coord[],
-                       unsigned char buf[]);
+#include "RaspiCamControl.h"
+
+typedef struct {
+    int fd;
+    struct sockaddr_storage saddr;
+    socklen_t saddr_len;
+    pthread_t pthread_id;
+} Tcp_Host_Info;
+
+typedef struct {
+    Tcp_Host_Info server;
+    int client_count;
+    Tcp_Host_Info* client;
+    pthread_mutex_t lock_mutex;           /// mutual exclusion lock
+
+    // Camera state
+    MMAL_COMPONENT_T camera_ptr;
+    RASPICAM_CAMERA_PARAMETERS cam_params;
+    bool test_image_enable;
+    unsigned char detect_yuv_min[3];
+    unsigned char detect_yuv_max[3];
+} Tcp_Comms;
+
+#define RASPICAM_SATURATION              1
+#define RASPICAM_SHARPNESS               2
+#define RASPICAM_CONTRAST                3
+#define RASPICAM_BRIGHTNESS              4
+#define RASPICAM_ISO                     5
+#define RASPICAM_METERING_MODE           6
+#define RASPICAM_VIDEO_STABILISATION     7
+#define RASPICAM_EXPOSURE_COMPENSATION   8
+#define RASPICAM_EXPOSURE_MODE           9
+#define RASPICAM_AWB_MODE               10
+#define RASPICAM_AWB_GAINS              11
+#define RASPICAM_IMAGE_FX               12
+#define RASPICAM_COLOUR_FX              13
+#define RASPICAM_ROTATION               14
+#define RASPICAM_FLIPS                  15
+#define RASPICAM_ROI                    16
+#define RASPICAM_SHUTTER_SPEED          17
+#define RASPICAM_DRC                    18
+#define RASPICAM_STATS_PASS             19
+//#define RASPICAM_ANNOTATE               20
+//#define RASPICAM_STEREO_MODE            21
+#define RASPICAM_TEST_IMAGE_ENABLE      22
+#define RASPICAM_DETECT_YUV             23
+
+typedef struct {
+    unsigned char tag;
+    unsigned char c[12];
+} Raspicam_Char_Msg;
+
+typedef struct {
+    unsigned char tag;
+    unsigned char filler[3];
+    int int0;
+    int int1;
+    int int2;
+} Raspicam_Int_Msg;
+
+typedef struct {
+    unsigned char tag;
+    unsigned char filler[3];
+    float float0;
+    float float1;
+    float float2;
+    float float3;
+} Raspicam_Float_Msg;
+
+int tcp_comms_construct(Tcp_Comms* comms_ptr,
+                        unsigned short port_number);

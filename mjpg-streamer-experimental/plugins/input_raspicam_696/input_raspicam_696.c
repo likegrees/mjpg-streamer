@@ -51,6 +51,7 @@
 #include "mmal/util/mmal_connection.h"
 #include "mmal/util/mmal_util.h"
 #include "overwrite_tif_tags.h"
+#include "detect_color_blobs.h"
 
 #include "RaspiCamControl.c"
 
@@ -94,6 +95,7 @@ typedef struct {
     unsigned int frame_no;
     MMAL_POOL_T* pool_ptr;
     FILE* raw_fp;
+    Blob_List blob_list;
 } Splitter_Callback_Data;
 
 static init_splitter_callback_data(Splitter_Callback_Data* p) {
@@ -142,6 +144,8 @@ typedef struct
   Splitter_Callback_Data* splitter_data_ptr;
   uint32_t offset;
   unsigned int frame_no;
+  unsigned int width;
+  unsigned int height;
 } PORT_USERDATA;
 
 
@@ -389,6 +393,10 @@ int input_init(input_parameter *param, int plugin_no)
           splitter_callback_data.blob_yuv_min[2] = opt4;
           splitter_callback_data.blob_yuv_max[2] = opt5;
           splitter_callback_data.detect_yuv = true;
+#define MAX_RUNS 10000
+#define MAX_BLOBS 1000
+          splitter_callback_data.blob_list = blob_list_init(MAX_RUNS,
+                                                            MAX_BLOBS);
         }
         break;
       case 33:
@@ -468,61 +476,22 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
 {
    MMAL_BUFFER_HEADER_T *new_buffer;
    Splitter_Callback_Data *pData = (Splitter_Callback_Data*)port->userdata;
-   fprintf(stderr, "splitter: %u %lld %lld len= %d\n",
-           pData->frame_no, buffer->pts, vcos_getmicrosecs64(), buffer->length);
+   fprintf(stderr, "splitter: %u %lld %lld %lld len= %d\n",
+           pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length);
 
-   /*
    if (pData != NULL) {
       mmal_buffer_header_mem_lock(buffer);
       if (pData->detect_yuv) {
-         bool do_modify_buffer = (pData->raw_file_handle != NULL);
-         detect_color_blobs(&pData->blob_list,
-                            pData->detect_yuv_min[0],
-                            pData->detect_yuv_min[1],
-                            pData->detect_yuv_max[1],
-                            pData->detect_yuv_min[2],
-                            pData->detect_yuv_max[2],
-                            do_modify_buffer,
-                            port->format->es->video.width,
-                            port->format->es->video.height,
-                            buffer->data);
-         if (do_modify_buffer) {
-            unsigned char red[3] = { 255, 0, 255 };
-            draw_bounding_boxes(&pData->blob_list, 30, red,
-                                port->format->es->video.width,
-                                port->format->es->video.height, buffer->data);
-         }
-      }
-      int bytes_written = 0;
-      int bytes_to_write = buffer->length;
-
-      // Write only luma component to get grayscale image:
-      if (buffer->length &&
-         pData->pstate->raw_output_fmt == RAW_OUTPUT_FMT_GRAY) {
-         bytes_to_write = port->format->es->video.width *
-                          port->format->es->video.height;
-      }
-
-      if (pData->raw_file_handle && bytes_to_write) {
-         bytes_written = fwrite(buffer->data, 1, bytes_to_write, pData->raw_file_handle);
-
-         pData->total_bytes_written += bytes_written;
-         if (bytes_written != bytes_to_write)
-         {
-            LOG_ERROR("Failed to write raw buffer data (%d from %d)- aborting", bytes_written, bytes_to_write);
-            pData->abort = 1;
-         }
+         detect_color_blobs(&pData->blob_list, pData->blob_yuv_min[0],
+                            pData->blob_yuv_min[1], pData->blob_yuv_max[1],
+                            pData->blob_yuv_min[2], pData->blob_yuv_max[2],
+                            false, port->format->es->video.width,
+                            port->format->es->video.height, buffer->data);
       }
       mmal_buffer_header_mem_unlock(buffer);
-      gettimeofday(&pData->last_frame_time, NULL);
-      long long tidiff = pData->last_frame_time.tv_usec - pData->start_time.tv_usec +
-                         (pData->last_frame_time.tv_sec - pData->start_time.tv_sec) * 1000000;
-      double tfdiff = tidiff / 1000000.0;
-      fprintf(stderr, "frame: %d  blobs: %d  time: %.3f  bytes: %d\n", pData->frame_no, pData->blob_list.used_root_list_count, tfdiff, pData->total_bytes_written);
    } else {
       LOG_ERROR("Received a camera buffer callback with no state");
    }
-   */
 
    // release buffer back to the pool
    mmal_buffer_header_release(buffer);
@@ -552,8 +521,8 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
 
   // We pass our file handle and other stuff in via the userdata field.
   PORT_USERDATA *pData = (PORT_USERDATA *)port->userdata;
-  fprintf(stderr, "encoder: %u %lld %lld len= %d flags= %x\n", pData->frame_no,
-          buffer->pts, vcos_getmicrosecs64(), buffer->length, buffer->flags);
+  fprintf(stderr, "encoder: %u %lld %lld %lld len= %d flags= %x\n", pData->frame_no,
+          buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length, buffer->flags);
 
   if (pData)
   {
@@ -578,19 +547,27 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
           /* Send the bounding boxes in the image packets by overwriting the
              tiff tags in the header supplied by Broadcom. */
 
-          unsigned int cols = port->format->es->video.height;
-          unsigned int rows = port->format->es->video.width;
+          unsigned int cols = pData->width;
+          unsigned int rows = pData->height;
           const unsigned int SIZE_FIELD_OFFSET = 4;
           unsigned int total_header_bytes = SIZE_FIELD_OFFSET +
                       (((unsigned int)buffer->data[4] << 8) | buffer->data[5]);
           const unsigned int TIFF_TAGS_OFFSET = 12;
 
-          /* For now, fake up 21 bboxes. */
-
           unsigned short bbox[84];
-          int ii;
-          for (ii = 0; ii < 84; ++ii) {
-            bbox[ii] = ii;
+          unsigned short bbox_count = 0;
+          if (pData->splitter_data_ptr->detect_yuv) {
+              bbox_count = copy_best_bounding_boxes(
+                                       &pData->splitter_data_ptr->blob_list,
+                                       20, 84, bbox);
+          } else {
+              /* For now, fake up 21 bboxes. */
+
+              int ii;
+              for (ii = 0; ii < 84; ++ii) {
+                bbox[ii] = ii;
+              }
+              bbox_count = 84;
           }
           overwrite_tif_tags(cols, rows, 84, bbox, buffer->data);
       }
@@ -688,18 +665,52 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
  * @param port Pointer to port from which callback originated
  * @param buffer mmal buffer header pointer
  */
-static void camera_control_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buffer)
-{
-  if (buffer->cmd == MMAL_EVENT_PARAMETER_CHANGED)
-  {
-    fprintf(stderr, "camera_control\n");
-  }
-  else
-  {
-    LOG_ERROR("Received unexpected camera control callback event");
-  }
+static void camera_control_callback(MMAL_PORT_T *port,
+                                    MMAL_BUFFER_HEADER_T *buffer) {
+    if (buffer->cmd == MMAL_EVENT_PARAMETER_CHANGED) {
+#define DSC1
+#ifdef DSC1
+        MMAL_EVENT_PARAMETER_CHANGED_T *param =
+            (MMAL_EVENT_PARAMETER_CHANGED_T *)buffer->data;
+        switch (param->hdr.id) {
+            case MMAL_PARAMETER_CAMERA_SETTINGS: {
+                 MMAL_PARAMETER_CAMERA_SETTINGS_T *settings =
+                     (MMAL_PARAMETER_CAMERA_SETTINGS_T*)param;
+                printf(
+                 "Exposure now %u, analog gain %u/%u, digital gain %u/%u ",
+                       settings->exposure,
+                       settings->analog_gain.num, settings->analog_gain.den,
+                       settings->digital_gain.num, settings->digital_gain.den);
+                printf("AWB R=%u/%u, B=%u/%u\n",
+                       settings->awb_red_gain.num, settings->awb_red_gain.den,
+                       settings->awb_blue_gain.num,
+                       settings->awb_blue_gain.den);
+                break;
+            }
+            /*
+            case MMAL_PARAMETER_CAPTURE_STATUS: {
+                 MMAL_PARAMETER_CAPTURE_STATUS_T* status_ptr =
+                                    (MMAL_PARAMETER_CAPTURE_STATUS_T*)param;
+                if (status_ptr->status ==
+                              MMAL_PARAM_CAPTURE_STATUS_CAPTURE_STARTED) {
+                    printf("Capture Started\n");
+                } else if (status_ptr->status ==
+                              MMAL_PARAM_CAPTURE_STATUS_CAPTURE_ENDED) {
+                    printf("Capture Ended\n");
+                }
+                break;
+            }
+            */
+        }
+#else
+        fprintf(stderr, "camera_control\n");
+#endif
+    } else {
+        LOG_ERROR("Received unexpected camera control callback event %d",
+                  buffer->cmd);
+    }
 
-  mmal_buffer_header_release(buffer);
+    mmal_buffer_header_release(buffer);
 }
 
 
@@ -1026,7 +1037,47 @@ void *worker_thread(void *arg)
 
   //Enable camera control port
   // Enable the camera, and tell it its control callback function
+#ifdef DSC1
+  MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T change_event_request =
+                         { { MMAL_PARAMETER_CHANGE_EVENT_REQUEST,
+                             sizeof(MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T) },
+                          MMAL_PARAMETER_CAMERA_SETTINGS, 1 };
+  (void)mmal_port_parameter_set(camera->control, &change_event_request.hdr);
+  /* Doesn't work with video
+  MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T change_event_request2 =
+                         { { MMAL_PARAMETER_CHANGE_EVENT_REQUEST,
+                             sizeof(MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T) },
+                          MMAL_PARAMETER_CAPTURE_STATUS, 1 };
+  (void)mmal_port_parameter_set(camera->control, &change_event_request2.hdr);
+  */
+#endif
   status = mmal_port_enable(camera->control, camera_control_callback);
+#ifdef DSC1
+  /* THIS IS HOW YOU GET THE TIME FROM THE CAMERA. 
+     Time is in microseconds (since boot).
+     This should match the frame time stamp (if you are in raw mode).
+  */
+  typedef struct {
+      MMAL_PARAMETER_HEADER_T hdr;
+      uint64_t time;
+  } Time_Request;
+  Time_Request time_request = { { MMAL_PARAMETER_SYSTEM_TIME,
+                                  sizeof(Time_Request) },
+                                  0 };
+  mmal_port_parameter_get(camera->control, &time_request.hdr);
+  printf("*********** time = %lld\n", time_request.time);
+
+  /* Query GPU for how much memory it is using. See raspicamcontrol_get_mem().
+     Memory is in megabytes.
+     The split between GPU and CPU memory is set by running "sudo raspi-config"
+     */
+  char response[80] = "";
+  int gpu_mem = 0;
+  if (vc_gencmd(response, sizeof response, "get_mem gpu") == 0)
+  vc_gencmd_number_property(response, "gpu", &gpu_mem);
+  printf("*********** gpu_mem = %d\n", gpu_mem);
+
+#endif
 
   if (status)
   {
@@ -1049,6 +1100,7 @@ void *worker_thread(void *arg)
       .stills_capture_circular_buffer_height = 0,
       .fast_preview_resume = 0,
       .use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RESET_STC
+      // consider .use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RAW_STC
     };
     mmal_port_parameter_set(camera->control, &cam_config.hdr);
   }
@@ -1206,6 +1258,7 @@ void *worker_thread(void *arg)
 
   encoder_input = encoder->input[0];
   encoder_output = encoder->output[0];
+
 
   // We want same format on input and output
   mmal_format_copy(encoder_output->format, encoder_input->format);
@@ -1398,6 +1451,8 @@ void *worker_thread(void *arg)
   callback_data.pool = pool;
   callback_data.offset = 0;
   callback_data.frame_no = 0;
+  callback_data.width = width;   // width of encode image
+  callback_data.height = height; // height of encode image
   callback_data.splitter_data_ptr = &splitter_callback_data;
 
   vcos_assert(vcos_semaphore_create(&callback_data.complete_semaphore, "RaspiStill-sem", 0) == VCOS_SUCCESS);
@@ -1597,7 +1652,3 @@ void worker_cleanup(void *arg)
   if(pglobal->in[plugin_number].buf != NULL)
     free(pglobal->in[plugin_number].buf);
 }
-
-
-
-

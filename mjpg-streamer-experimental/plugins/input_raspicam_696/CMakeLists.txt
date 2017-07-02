@@ -20,7 +20,7 @@ if (PLUGIN_INPUT_RASPICAM)
 
     link_directories(/opt/vc/lib)
 
-    MJPG_STREAMER_PLUGIN_COMPILE(input_raspicam_696 input_raspicam_696.c overwrite_tif_tags.c)
+    MJPG_STREAMER_PLUGIN_COMPILE(input_raspicam_696 input_raspicam_696.c overwrite_tif_tags.c detect_color_blobs.c)
 
     target_link_libraries(input_raspicam_696 mmal_core mmal_util mmal_vc_client vcos bcm_host)
 
