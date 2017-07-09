@@ -88,13 +88,14 @@ typedef struct {
 } Component_Pool;
 
 typedef struct {
-    bool write_images;
     bool detect_yuv;
+    bool yuv_write;
+    bool jpg_write;
     unsigned char blob_yuv_min[3];
     unsigned char blob_yuv_max[3];
     unsigned int frame_no;
     MMAL_POOL_T* pool_ptr;
-    FILE* raw_fp;
+    FILE* yuv_fp;
     Blob_List blob_list;
     pthread_mutex_t bbox_mutex;
 #define MAX_BBOXES 20
@@ -104,7 +105,6 @@ typedef struct {
 
 static init_splitter_callback_data(Splitter_Callback_Data* p) {
     p->detect_yuv = false;
-    p->write_images = false;
     p->blob_yuv_min[0] = 0;
     p->blob_yuv_min[1] = 0;
     p->blob_yuv_min[2] = 0;
@@ -113,7 +113,9 @@ static init_splitter_callback_data(Splitter_Callback_Data* p) {
     p->blob_yuv_max[2] = 0;
     p->frame_no = UINT_MAX; // encoder throws away 1st frame so we should too
     p->pool_ptr = NULL;
-    p->raw_fp = NULL;
+    p->jpg_write = false;
+    p->yuv_write = false;
+    p->yuv_fp = NULL;
     p->bbox_element_count = 0;
     pthread_mutex_init(&p->bbox_mutex, NULL);
 }
@@ -144,7 +146,6 @@ static struct timeval timestamp;
  */
 typedef struct
 {
-  FILE *file_handle; /// File handle to write buffer data to.
   VCOS_SEMAPHORE_T complete_semaphore; /// semaphore which is posted when we reach end of frame (indicates end of capture or fault)
   MMAL_POOL_T *pool; /// pointer to our state in case required in callback
   Splitter_Callback_Data* splitter_data_ptr;
@@ -230,7 +231,8 @@ int input_init(input_parameter *param, int plugin_no)
       {"awbgainR", required_argument, 0, 0},          // 30
       {"awbgainB", required_argument, 0, 0},          // 31
       {"blobyuv", required_argument, 0, 0},           // 32
-      {"writeimages", no_argument, 0, 0},             // 33
+      {"writeyuv", no_argument, 0, 0},                // 33
+      {"writejpg", no_argument, 0, 0},                // 34
       {0, 0, 0, 0}
     };
 
@@ -406,8 +408,12 @@ int input_init(input_parameter *param, int plugin_no)
         }
         break;
       case 33:
-        //writeimages
-        splitter_callback_data.write_images = true;
+        //writeyuv
+        splitter_callback_data.yuv_write = true;
+        break;
+      case 34:
+        //writejpg
+        splitter_callback_data.jpg_write = true;
         break;
       default:
         DBG("default case\n");
@@ -503,6 +509,9 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
             printf("bbox_element_count= %d\n", pData->bbox_element_count);
         }
         mmal_buffer_header_mem_unlock(buffer);
+        if (pData->yuv_fp != NULL) {
+            fwrite(buffer->data, 1, buffer->length, pData->yuv_fp);
+        }
     } else {
         LOG_ERROR("Received a camera buffer callback with no state");
     }
@@ -594,7 +603,6 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
 #endif
       memcpy(pData->offset + pglobal->in[plugin_number].buf, buffer->data, buffer->length);
       pData->offset += buffer->length;
-      //fwrite(buffer->data, 1, buffer->length, pData->file_handle);
       mmal_buffer_header_mem_unlock(buffer);
     }
 
@@ -944,6 +952,7 @@ void help(void)
       " [-usestills]...........: uses stills mode instead of video mode \n"\
       " [-preview].............: Enable full screen preview\n"\
       " [-timestamp]...........: Get timestamp for each frame\n"
+      " [-writeyuv]............: Write to out_WWWW_HHHH.yuv\n"
       " \n"\
       " -sh  : Set image sharpness (-100 to 100)\n"\
       " -co  : Set image contrast (-100 to 100)\n"\
@@ -1173,6 +1182,7 @@ void *worker_thread(void *arg)
     format = camera_video_port->format;
     format->encoding_variant = MMAL_ENCODING_I420;
     format->encoding = MMAL_ENCODING_I420;
+    //format->encoding_variant = MMAL_ENCODING_OPAQUE; //DSC
     format->es->video.width = width;
     format->es->video.height = height;
     format->es->video.crop.x = 0;
@@ -1338,7 +1348,7 @@ void *worker_thread(void *arg)
   // Set up optional splitter component
 
   status = MMAL_SUCCESS;
-  if (splitter_callback_data.detect_yuv || splitter_callback_data.write_images)
+  if (splitter_callback_data.detect_yuv || splitter_callback_data.yuv_fp != NULL)
   {
       splitter_pair = create_splitter_component(camera);
       if (splitter_pair.component_ptr == NULL) status = MMAL_ENOSYS;
@@ -1348,7 +1358,7 @@ void *worker_thread(void *arg)
     if (wantPreview)
     {
       if (splitter_callback_data.detect_yuv ||
-          splitter_callback_data.write_images) {
+          splitter_callback_data.yuv_fp != NULL) {
         // Connect camera preview output to splitter input
   
         status = connect_ports(camera_preview_port,
@@ -1385,7 +1395,7 @@ void *worker_thread(void *arg)
       }
     } else {
       if (splitter_callback_data.detect_yuv ||
-          splitter_callback_data.write_images)
+          splitter_callback_data.yuv_fp != NULL)
       {
         // Connect camera to splitter
         status = connect_ports(camera_preview_port,
@@ -1419,6 +1429,11 @@ void *worker_thread(void *arg)
                 splitter_pair.component_ptr->output[SPLITTER_CALLBACK_PORT];
     splitter_callback_port->userdata =
                       (struct MMAL_PORT_USERDATA_T *)&splitter_callback_data;
+    if (splitter_callback_data.yuv_write) {
+        char filename[32];
+        snprintf(filename, 32, "out_%04d_%04d.yuv", width, height);
+        splitter_callback_data.yuv_fp = fopen(filename, "wb");
+    }
     status = mmal_port_enable(splitter_callback_port, splitter_buffer_callback);
     if (status != MMAL_SUCCESS)
     {
@@ -1450,7 +1465,6 @@ void *worker_thread(void *arg)
   // Set up our userdata - this is passed though to the callback where we need the information.
   // Null until we open our filename
   PORT_USERDATA callback_data;
-  callback_data.file_handle = NULL;
   callback_data.pool = pool;
   callback_data.offset = 0;
   callback_data.frame_no = 0;
@@ -1576,6 +1590,11 @@ void *worker_thread(void *arg)
   }
 
   vcos_semaphore_delete(&callback_data.complete_semaphore);
+
+  // DSC
+  if (splitter_callback_data.yuv_fp != NULL) {
+    fclose(splitter_callback_data.yuv_fp);
+  }
 
   //Close everything MMAL
   if (usestills)

@@ -254,6 +254,10 @@ static void set_parent(Blob_List* p,
     assert(child_index < p->used_blob_set_count);
     assert(new_parent_index < p->used_blob_set_count);
     Blob_Set_Entry* child_ptr = &p->blob_set[child_index];
+    // TODO: is this test correct?
+    // Test fails if child is already a root.
+    // Shouldn't child be changed to point at new_parent even in this case.
+    // Looks like a bug to me.
     if (child_ptr->parent_index != child_index) {
         child_ptr->parent_index = new_parent_index;
         stats_add(&p->blob_set[new_parent_index].stats, &child_ptr->stats);
@@ -378,6 +382,7 @@ static void yuv_run_union(Blob_List* p,
             if (a_parent != b_parent) {
                 b->parent_index = link(p, a_parent, b_parent);
                 //fprintf(stderr, "link(%hu %hu) -> %hu\n", a_parent, b_parent, b->parent_index);
+                // TODO: ??? a_parent = b->parent_index;
             } else {
                 //fprintf(stderr, "equal(%hu %hu) -> %hu\n", a_parent, b_parent, b_parent);
             }
