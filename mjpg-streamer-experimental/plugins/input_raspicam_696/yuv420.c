@@ -112,8 +112,8 @@ int yuv420_write(const char* filename,
                  unsigned char* buf) {
     FILE* fp = fopen(filename, "wb");
     if (fp == NULL) return -1;
-    fprintf(fp, "#!YUV420 %u,%u\n", width, height);
-    fwrite(buf, 1, width * height, fp);
+    fprintf(fp, "#!YUV420 %7u,%7u\n", width, height);
+    fwrite(buf, 1, width * height * 3 / 2, fp);
     fclose(fp);
     return 0;
 }
@@ -199,15 +199,15 @@ static unsigned char limit255(int val) {
 }
 
 
-int convert_yuv420_to_rgb(unsigned int cols,
-                          unsigned int rows,
-                          const unsigned char yuv[],
-                          unsigned char rgb[]) {
+void convert_yuv420_to_rgb(unsigned int cols,
+                           unsigned int rows,
+                           const unsigned char yuv[],
+                           unsigned char rgb[]) {
     unsigned int ii;
     unsigned int jj;
     unsigned int pixels = cols * rows;
     for (ii = 0; ii < rows; ++ii) {
-        unsigned char* row = &rgb[ii * (3 * rows)];
+        unsigned char* row = &rgb[ii * (3 * cols)];
         for (jj = 0; jj < cols; ++jj) {
             /* formulas are from https://en.wikipedia.org/wiki/YUV */
             int y = yuv[ii * cols + jj];

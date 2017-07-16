@@ -1433,6 +1433,7 @@ void *worker_thread(void *arg)
         char filename[32];
         snprintf(filename, 32, "out_%04d_%04d.yuv", width, height);
         splitter_callback_data.yuv_fp = fopen(filename, "wb");
+        fprintf(fp, "#!YUV420 %7u,%7u\n", width, height);
     }
     status = mmal_port_enable(splitter_callback_port, splitter_buffer_callback);
     if (status != MMAL_SUCCESS)
