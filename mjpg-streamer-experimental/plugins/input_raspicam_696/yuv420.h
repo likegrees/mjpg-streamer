@@ -154,6 +154,9 @@ unsigned char* yuv420_read(const char* filename,
  * @param width [in]    The number of columns in img.
  * @param height [in]   The number of rows in img.
  * @param img [in]      The YUV420 image to write.
+ *
+ * @return Zero on success; -1 on failure.  The most likely cause of failure
+ *         is that filename cannot be opened for writing.
  */
 int yuv420_write(const char* filename,
                  unsigned int width,

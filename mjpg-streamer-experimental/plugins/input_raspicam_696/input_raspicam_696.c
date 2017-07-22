@@ -262,12 +262,14 @@ int input_init(input_parameter *param, int plugin_no)
       case 3:
         DBG("case 2,3\n");
         width = atoi(optarg);
+        width = VCOS_ALIGN_UP(width, 32); // DSC
         break;
         /* height */
       case 4:
       case 5:
         DBG("case 4,5\n");
         height = atoi(optarg);
+        height = VCOS_ALIGN_UP(height, 16); // DSC
         break;
         /* fps */
       case 6:
@@ -487,8 +489,8 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
                                      MMAL_BUFFER_HEADER_T *buffer) {
     MMAL_BUFFER_HEADER_T *new_buffer;
     Splitter_Callback_Data *pData = (Splitter_Callback_Data*)port->userdata;
-    fprintf(stderr, "splitter: %u %lld %lld %lld len= %d\n",
-            pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length);
+    fprintf(stderr, "splitter: %u %lld %lld %lld len= %d (%d x %d)\n",
+            pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length, port->format->es->video.width, port->format->es->video.height);
 
     if (pData != NULL) {
         mmal_buffer_header_mem_lock(buffer);
@@ -1431,9 +1433,10 @@ void *worker_thread(void *arg)
                       (struct MMAL_PORT_USERDATA_T *)&splitter_callback_data;
     if (splitter_callback_data.yuv_write) {
         char filename[32];
-        snprintf(filename, 32, "out_%04d_%04d.yuv", width, height);
+        snprintf(filename, 32, "out.yuv");
         splitter_callback_data.yuv_fp = fopen(filename, "wb");
-        fprintf(fp, "#!YUV420 %7u,%7u\n", width, height);
+        fprintf(splitter_callback_data.yuv_fp,
+                "#!YUV420 %7u,%7u\n", width, height);
     }
     status = mmal_port_enable(splitter_callback_port, splitter_buffer_callback);
     if (status != MMAL_SUCCESS)

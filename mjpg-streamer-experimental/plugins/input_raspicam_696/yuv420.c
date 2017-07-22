@@ -51,6 +51,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <errno.h>
 #include "yuv420.h"
 
 Yuv_File yuv420_open_read(const char* filename) {
@@ -59,7 +60,17 @@ Yuv_File yuv420_open_read(const char* filename) {
     file.rows = 0;
     file.fp = fopen(filename, "rb");
     if (file.fp == NULL) return file;
-    int items = fscanf(file.fp, "#!YUV420 %u,%u\n", &file.cols, &file.rows);
+#define YUV_HEADER_BYTES 25
+    unsigned char header[YUV_HEADER_BYTES];
+    size_t items_read = fread(header, 1, YUV_HEADER_BYTES, file.fp);
+    if (items_read != YUV_HEADER_BYTES) {
+        fclose(file.fp);
+        file.fp = NULL;
+        file.cols = 0;
+        file.rows = 0;
+        return file;
+    }
+    int items = sscanf(header, "#!YUV420 %u,%u", &file.cols, &file.rows);
     if (items != 2) {
         fclose(file.fp);
         file.fp = NULL;
@@ -84,6 +95,7 @@ int yuv420_read_next(const Yuv_File* yuv_fp,
     size_t pixels = yuv_fp->cols * yuv_fp->rows;
     size_t bytes = pixels * 3 / 2;
     size_t items_read = fread(buf, 1, bytes, yuv_fp->fp);
+    fprintf(stderr, "bytes= %u items_read= %u errno= %d\n", bytes, items_read, errno);
     if (items_read != bytes) return -1;
     return 0;
 }

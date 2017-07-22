@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <jpeglib.h>
 #include "detect_color_blobs.h"
+#include "yuv420.h"
 
 static unsigned char* jpeg_read(const char* filename,
                                 unsigned int* width_ptr,
@@ -129,7 +130,7 @@ static int convert_rgb_to_yuv440(unsigned int width,
 
 
 int main(int argc, const char* argv[]) {
-    if (argc != 9) {
+    if (argc != 8) {
         fprintf(stderr,
                 "usage: img_in y_low y_high u_low u_high v_low v_high\n");
         return -1;
@@ -153,43 +154,7 @@ int main(int argc, const char* argv[]) {
 
         // Read the .yuv file.
 
-        FILE* fp = fopen(in_fn, "rb");
-        if (fp == NULL) {
-            fprintf(stderr, "can't open %s for reading\n", in_fn);
-            return -1;
-        }
-        const size_t MAX_YUV_BYTES = 13000000;
-        yuv = (unsigned char*)malloc(MAX_YUV_BYTES);
-        yuv_bytes = fread(yuv, 1, MAX_YUV_BYTES, fp);
-        fclose(fp);
-
-        // Guess the image size from the file size.
-
-        unsigned int ii;
-        const unsigned int img_size_table[][2] = { { 1920, 1080 }, 
-                                                   { 2592, 1944 },
-                                                   { 1296,  972 },
-                                                   { 1296,  730 },
-                                                   {  640,  480 },
-                                                   { 3280, 2464 },
-                                                   { 1640, 1232 },
-                                                   { 1640,  922 },
-                                                   { 1280,  720 } };
-#define IMG_SIZE_COUNT (sizeof(img_size_table) / sizeof(img_size_table[0]))
-        for (ii = 0; ii < IMG_SIZE_COUNT; ++ii) {
-            unsigned int w = img_size_table[ii][0];
-            unsigned int h = img_size_table[ii][1];
-            if (yuv_bytes == w * h * 3 / 2) {
-                cols = w;
-                rows = h;
-                break;
-            }
-        }
-        if (ii == IMG_SIZE_COUNT) {
-            fprintf(stderr, "read %u bytes from %s; unrecognized file size\n",
-                    yuv_bytes, in_fn);
-            return -1;
-        }
+        yuv = yuv420_read(in_fn, &cols, &rows);
     } else {
         // Assume it's a .jpg file.
 
@@ -219,12 +184,10 @@ int main(int argc, const char* argv[]) {
     draw_bounding_boxes(&bl, 30, red, cols, rows, yuv);
     blob_list_deinit(&bl);
 
-    FILE* fp = fopen("out.yuv", "w");
-    if (fp == NULL) {
+    if (yuv420_write("bbox.yuv", cols, rows, yuv) < 0) {
         fprintf(stderr, "can't open out.yuv for writing\n");
         return -1;
     }
-    fwrite(yuv, 1, yuv_bytes, fp);
     free(yuv);
     return 0;
 }
