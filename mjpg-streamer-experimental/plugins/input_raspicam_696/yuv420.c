@@ -95,7 +95,7 @@ int yuv420_read_next(const Yuv_File* yuv_fp,
     size_t pixels = yuv_fp->cols * yuv_fp->rows;
     size_t bytes = pixels * 3 / 2;
     size_t items_read = fread(buf, 1, bytes, yuv_fp->fp);
-    fprintf(stderr, "bytes= %u items_read= %u errno= %d\n", bytes, items_read, errno);
+    //fprintf(stderr, "bytes= %u items_read= %u errno= %d\n", bytes, items_read, errno);
     if (items_read != bytes) return -1;
     return 0;
 }
@@ -162,9 +162,9 @@ int convert_rgb_to_yuv420(unsigned int width,
     if (yuv_bytes < required_yuv_bytes) return -1;
     unsigned char* u = &yuv[pixels];
     unsigned char* v = &yuv[pixels + pixels / 4];
-    for (ii = 0; ii < height / 4; ++ii) {
-        for (jj = 0; jj < width / 4; ++jj) {
-            unsigned int yno_00 = ii * (2 * width) + 2 * jj;
+    for (ii = 0; ii < height; ++ii) {
+        for (jj = 0; jj < width; ++jj) {
+            unsigned int yno_00 = ii * width + jj;
             unsigned int yno_01 = yno_00 + 1;
             unsigned int yno_10 = yno_00 + width;
             unsigned int yno_11 = yno_10 + 1;
@@ -186,18 +186,20 @@ int convert_rgb_to_yuv420(unsigned int width,
             y[yno_10] = y_from_rgb(r10, g10, b10);
             y[yno_11] = y_from_rgb(r11, g11, b11);
 
-            unsigned int uvno = ii * width + jj;
-            unsigned short u_val = u_from_rgb(r00, g00, b00);
-            u_val += u_from_rgb(r01, g01, b01);
-            u_val += u_from_rgb(r10, g10, b10);
-            u_val += u_from_rgb(r11, g11, b11);
-            u[uvno] = (unsigned char)((u_val + 2) / 4);
+            if (ii % 2 == 0 && jj % 2 == 0) {
+                unsigned int uvno = (ii / 2) * (width / 2) + (jj / 2);
+                unsigned short u_val = u_from_rgb(r00, g00, b00);
+                u_val += u_from_rgb(r01, g01, b01);
+                u_val += u_from_rgb(r10, g10, b10);
+                u_val += u_from_rgb(r11, g11, b11);
+                u[uvno] = (unsigned char)((u_val + 2) / 4);
 
-            unsigned short v_val = v_from_rgb(r00, g00, b00);
-            v_val += v_from_rgb(r01, g01, b01);
-            v_val += v_from_rgb(r10, g10, b10);
-            v_val += v_from_rgb(r11, g11, b11);
-            v[uvno] = (unsigned char)((v_val + 2) / 4);
+                unsigned short v_val = v_from_rgb(r00, g00, b00);
+                v_val += v_from_rgb(r01, g01, b01);
+                v_val += v_from_rgb(r10, g10, b10);
+                v_val += v_from_rgb(r11, g11, b11);
+                v[uvno] = (unsigned char)((v_val + 2) / 4);
+            }
         }
     }
     return required_yuv_bytes;

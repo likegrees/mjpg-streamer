@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <errno.h>
+#include <time.h>
 #include <jpeglib.h>
 #include "detect_color_blobs.h"
 #include "yuv420.h"
@@ -127,7 +127,20 @@ static int convert_rgb_to_yuv440(unsigned int width,
     return required_yuv_bytes;
 }
 
+static double delta_time(struct timespec* a_ptr, struct timespec* b_ptr) {
+    return (b_ptr->tv_sec - a_ptr->tv_sec) +
+           (b_ptr->tv_nsec - a_ptr->tv_nsec) / 1000000000.0;
+}
 
+static void dump_blob_set_stats(Blob_List* p, int index) {
+    const Blob_Stats* s = &p->blob_set[index].stats;
+    fprintf(stderr,
+"set %3hu: bbox (%5d %5d) (%5d %5d) cnt %6d sum (%7d %7d) center (%5d %5d)\n",
+            index, s->min_x, s->min_y, s->max_x, s->max_y, s->count,
+            s->sum_x, s->sum_y,
+            (s->sum_x + s->count / 2) / s->count,
+            (s->sum_y + s->count / 2) / s->count);
+}
 
 int main(int argc, const char* argv[]) {
     if (argc != 8) {
@@ -155,6 +168,10 @@ int main(int argc, const char* argv[]) {
         // Read the .yuv file.
 
         yuv = yuv420_read(in_fn, &cols, &rows);
+        if (yuv == NULL) {
+            fprintf(stderr, "can't read %s\n", in_fn);
+            return -1;
+        }
     } else {
         // Assume it's a .jpg file.
 
@@ -175,13 +192,38 @@ int main(int argc, const char* argv[]) {
         free(rgb);
     }
 
+    struct timespec start_time;
+    struct timespec end_time;
+    clock_gettime(CLOCK_REALTIME, &start_time);
 #define MAX_RUNS 10000
 #define MAX_BLOBS 1000
     Blob_List bl = blob_list_init(MAX_RUNS, MAX_BLOBS);
     int err_no = detect_color_blobs(&bl, y_low, u_low, u_high, v_low, v_high,
                                     true, cols, rows, yuv);
+    clock_gettime(CLOCK_REALTIME, &end_time);
+
+    int ii;
+    fprintf(stderr, "All blobs:\n");
+    for (ii = 0; ii < bl.used_root_list_count; ++ii) {
+        int ss = bl.root_list[ii];
+        dump_blob_set_stats(&bl, ss);
+    }
+    sort_blobs_by_pixel_count(&bl);
+
+    fprintf(stderr, "Sorted blobs:\n");
+    for (ii = 0; ii < bl.used_root_list_count; ++ii) {
+        int ss = bl.root_list[ii];
+        dump_blob_set_stats(&bl, ss);
+    }
+
     unsigned char red[3] = { 255, 0, 255 };
     draw_bounding_boxes(&bl, 30, red, cols, rows, yuv);
+
+    double elapsed_secs = delta_time(&start_time, &end_time);
+    fprintf(stderr,
+            "cr=( %d %d ) total_pixels= %u elapsed_secs= %.6f %.3f Hz\n",
+            cols, rows, get_total_blob_pixel_count(&bl), elapsed_secs,
+            1.0 / elapsed_secs);
     blob_list_deinit(&bl);
 
     if (yuv420_write("bbox.yuv", cols, rows, yuv) < 0) {

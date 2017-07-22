@@ -54,8 +54,18 @@
 #include <stdlib.h>
 #include "detect_color_blobs.h"
 
+#ifdef DCB_DEBUG
+#define DPRINT(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define DPRINT(...)
+#endif
 
-/**** Operations on Blob_Stats ******/
+
+/****************************************
+ ****                                ****
+ ****    Operations on Blob_Stats    ****
+ ****                                ****
+ ****************************************/
 
 static void stats_init(Blob_Stats* stats_ptr,
                        unsigned short row,
@@ -66,11 +76,14 @@ static void stats_init(Blob_Stats* stats_ptr,
     stats_ptr->min_y = row;
     stats_ptr->max_y = row;
     unsigned long count = col_high - col_low;
-    stats_ptr->sum_x = count * (col_low + col_high - 1) / 2;
+    stats_ptr->sum_x = (col_low + col_high - 1) * count / 2;
     stats_ptr->sum_y = row * count;
     stats_ptr->count = count;
 }
 
+/**
+ * @brief Add the given YUV run into statistics at stats_ptr.
+ */
 static void stats_add_singleton(Blob_Stats* stats_ptr,
                                 unsigned short row,
                                 unsigned short col_low,
@@ -81,6 +94,8 @@ static void stats_add_singleton(Blob_Stats* stats_ptr,
     if (row < stats_ptr->min_y) stats_ptr->min_y = row;
     if (row > stats_ptr->min_y) stats_ptr->max_y = row;
     unsigned long count = col_high - col_low;
+    stats_ptr->sum_x += (col_low + col_high - 1) * count / 2;
+    stats_ptr->sum_y += row * count;
     stats_ptr->count += count;
 }
 
@@ -96,7 +111,11 @@ static void stats_add(Blob_Stats* a_ptr,
     a_ptr->count += b_ptr->count;
 }
 
-/***** Operations on Uv_Runs ******/
+/*************************************
+ ****                             ****
+ ****    Operations on Uv_Runs    ****
+ ****                             ****
+ *************************************/
 
 typedef struct {
     unsigned short run_low;
@@ -150,7 +169,11 @@ static unsigned int create_uv_run_sequence(int cols,
     return uv_run_count;
 }
 
-/***** Operations on Yuv_Runs ******/
+/**************************************
+ ****                              ****
+ ****    Operations on Yuv_Runs    ****
+ ****                              ****
+ **************************************/
 
 typedef struct {
     Blob_Set_Index parent_index;
@@ -195,6 +218,9 @@ static Blob_Set_Index make_set(Blob_List* p,
     if (p->used_blob_set_count >= p->max_blob_set_count ||
         p->used_root_list_count >= p->max_root_list_count) {
         // No space for a new set.
+        DPRINT(
+        "   make_set(row %d a= (%hu .. %hu) -> set %hu  (no space for new set)\n",
+               row, yuv_run_ptr->run_low, yuv_run_ptr->run_high, 0);
         return 0;
     }
 
@@ -214,6 +240,9 @@ static Blob_Set_Index make_set(Blob_List* p,
     /* Add the new Blob_Set_Entry to the root_list. */
 
     set_root_list_entry(p, new_root_list_index, new_blob_set_index);
+    DPRINT("   make_set(row %d a= (%hu .. %hu) -> set %hu cnt %d\n",
+           row, yuv_run_ptr->run_low, yuv_run_ptr->run_high,
+           new_blob_set_index, new_entry_ptr->stats.count);
     return new_blob_set_index;
 }
 
@@ -233,9 +262,10 @@ static void delete_root_list_entry(Blob_List* p,
 
     /* Overwrite it with the last entry. */
 
-    Root_List_Index last_root_list_index = --p->used_root_list_count;
+    Root_List_Index last_root_list_index = p->used_root_list_count - 1;
     Blob_Set_Index last_blob_set_index = p->root_list[last_root_list_index];
     set_root_list_entry(p, ix, last_blob_set_index);
+    --p->used_root_list_count;
 }
 
 
@@ -250,7 +280,7 @@ static void delete_root_list_entry(Blob_List* p,
 static void set_parent(Blob_List* p,
                        Blob_Set_Index child_index,
                        Blob_Set_Index new_parent_index) {
-    //fprintf(stderr, "set_parent of %d to %d ", child_index, new_parent_index); //DEBUG
+    DPRINT("   set_parent of set %d to set %d ", child_index, new_parent_index);
     assert(child_index < p->used_blob_set_count);
     assert(new_parent_index < p->used_blob_set_count);
     Blob_Set_Entry* child_ptr = &p->blob_set[child_index];
@@ -258,7 +288,7 @@ static void set_parent(Blob_List* p,
     // Test fails if child is already a root.
     // Shouldn't child be changed to point at new_parent even in this case.
     // Looks like a bug to me.
-    if (child_ptr->parent_index != child_index) {
+    // if (child_ptr->parent_index != child_index) {
         child_ptr->parent_index = new_parent_index;
         stats_add(&p->blob_set[new_parent_index].stats, &child_ptr->stats);
         Root_List_Index rx = child_ptr->root_list_index;
@@ -266,7 +296,7 @@ static void set_parent(Blob_List* p,
             delete_root_list_entry(p, rx);
             child_ptr->root_list_index = NOT_A_ROOT_LIST_INDEX;
         }
-    }
+    // }
 }
 
 
@@ -280,13 +310,13 @@ static void set_parent(Blob_List* p,
 static Blob_Set_Index find_root(Blob_List* p, Blob_Set_Index index) {
     Blob_Set_Index parent = index;
     assert(index < p->used_blob_set_count);
-    //fprintf(stderr, "find_root of %d ", index); //DEBUG
+    DPRINT("   find_root of set %d", index);
     if (p->blob_set[index].parent_index != index) {
         // Note recursive call to find_root().
         parent = find_root(p, p->blob_set[index].parent_index);
         set_parent(p, index, parent);
     }
-    //fprintf(stderr, "is %d\n", parent); //DEBUG
+    DPRINT(" is %d\n", parent);
     return parent;
 }
 
@@ -331,11 +361,10 @@ static void yuv_run_union(Blob_List* p,
                           Yuv_Run* b) {
     Blob_Set_Index a_parent = a->parent_index;
     Blob_Set_Index b_parent = b->parent_index;
-    /*
-    fprintf(stderr, "yuv_run_union: row %d a= (%hu %hu %hu) b= (%hu %hu %hu): ",
+    DPRINT(
+    "yuv_run_union(a= row %d parent set %hu col (%hu .. %hu) b= row %d parent set %hu col (%hu .. %hu)):\n",
            a_row, a_parent, a->run_low, a->run_high,
-           b_parent, b->run_low, b->run_high); // DEBUG
-    */
+           b_row, b_parent, b->run_low, b->run_high);
     if (a_parent == 0 && b_parent == 0) {
         /* Both a and b are singletons.  I.e. neither has yet been added to
            a Blob_Set.  Make a new Blob_Set for a, then add b to it. */
@@ -348,7 +377,9 @@ static void yuv_run_union(Blob_List* p,
         assert(a_parent < p->used_blob_set_count);
         stats_add_singleton(&p->blob_set[a_parent].stats, b_row, b->run_low,
                             b->run_high);
-        //fprintf(stderr, "make_set(%d %d) %hu\n", 0, 0, a_parent);
+        DPRINT("   add_single(row %d col (%hu .. %hu) --> set %hu cnt %d\n",
+               b_row, b->run_low, b->run_high, a_parent,
+               p->blob_set[a_parent].stats.count);
     } else {
         // At most one of a_parent and b_parent is 0.
         unsigned short b_run_low = b->run_low;
@@ -365,6 +396,10 @@ static void yuv_run_union(Blob_List* p,
             a = b;
             b = swap_tmp2;
             assert(a_parent != 0);
+            DPRINT(
+"   swap_a_b: a= row %d parent set %hu col (%hu .. %hu) b= row %d parent set %hu col (%hu .. %hu)\n",
+                   a_row, a_parent, a->run_low, a->run_high,
+                   b_row, b_parent, b->run_low, b->run_high);
         }
         // Now we know a_parent is not 0.
         if (b_parent == 0) {
@@ -374,31 +409,39 @@ static void yuv_run_union(Blob_List* p,
             assert(a_parent < p->used_blob_set_count);
             stats_add_singleton(&p->blob_set[a_parent].stats, b_row, b_run_low,
                                 b_run_high);
-            //fprintf(stderr, "simple(%hu %hu) %hu\n", a_parent, b_parent, a_parent);
+            DPRINT(
+          "   simple: add_single(row %d col (%hu .. %hu) --> set %hu cnt %d\n",
+                   b_row, b_run_low, b_run_high, a_parent,
+                   p->blob_set[a_parent].stats.count);
         } else {
             // Neither a_parent nor b_parent is 0.
             a_parent = find_root(p, a_parent);
             b_parent = find_root(p, b_parent);
             if (a_parent != b_parent) {
                 b->parent_index = link(p, a_parent, b_parent);
-                //fprintf(stderr, "link(%hu %hu) -> %hu\n", a_parent, b_parent, b->parent_index);
-                // TODO: ??? a_parent = b->parent_index;
+                DPRINT("link(set %hu set %hu) -> set %hu cnt %d\n",
+                       a_parent, b_parent, b->parent_index,
+                       p->blob_set[b->parent_index].stats.count);
+                a_parent = b->parent_index;  //DSC Added 2017/07/22
             } else {
-                //fprintf(stderr, "equal(%hu %hu) -> %hu\n", a_parent, b_parent, b_parent);
+                DPRINT("already_equal(set %hu set %hu) -> set %hu cnt %d\n",
+                       a_parent, b_parent, b_parent,
+                       p->blob_set[b_parent].stats.count);
             }
         }
     }
     a->parent_index = a_parent;
 
-    /*
-    fprintf(stderr, "root_list=");
+#ifdef DCB_DEBUG
+    DPRINT("   root_list= set ");
     int ii;
     for (ii = 0; ii < p->used_root_list_count; ++ii) {
-        fprintf(stderr, " %hu", p->root_list[ii]);
+        DPRINT(" %hu", p->root_list[ii]);
     }
-    fprintf(stderr, "\n");
-    */
+    DPRINT("\n");
+#endif
 }
+
 /* Run through a single row of y values; for any pixel whose y value is above
    threshold and has u and v values within threshold add that pixel to a
    yuv_run entry. */
@@ -477,6 +520,7 @@ static void yuv_run_row_union(Blob_List* p,
     }
 }
 
+
 int detect_color_blobs(Blob_List* p,
                        unsigned char y_low,
                        unsigned char u_low,
@@ -516,12 +560,6 @@ int detect_color_blobs(Blob_List* p,
     blob_list_clear(p);
 
     for (ii = 0; ii < rows; ++ii) {
-        /**** DEBUG ***
-        if (ii == 432) {
-            printf("row %d\n", ii);
-        }
-        */
-
         /* Process row ii of the image. */
 
         if ((ii & 0x01) == 0) {
@@ -588,6 +626,7 @@ int detect_color_blobs(Blob_List* p,
     return 0;
 }
 
+#if 0
 static inline bool is_less(Blob_List* p, Blob_Set_Index a, Blob_Set_Index b) {
     int a_pix_count = get_blob_stats(p, a)->count;
     int b_pix_count = get_blob_stats(p, b)->count;
@@ -604,7 +643,6 @@ static inline bool is_less(Blob_List* p, Blob_Set_Index a, Blob_Set_Index b) {
  */
 static const int inc_schedule[] = { 1, 4, 10, 23, 57, 132, 301, 701 };
 #define INC_SCHEDULE_SIZE ((int)(sizeof(inc_schedule)/sizeof(inc_schedule[0])))
-
 
 void shell_sort_blobs_by_pixel_count(Blob_List* p) {
 
@@ -624,6 +662,23 @@ void shell_sort_blobs_by_pixel_count(Blob_List* p) {
             set_root_list_entry(p, j, temp_arr);
         }
     }
+}
+#endif
+
+static int compare_counts(const void* void_a_ptr,
+                          const void* void_b_ptr,
+                          void* void_p) {
+    Blob_Set_Index a = *(Blob_Set_Index*)void_a_ptr;
+    Blob_Set_Index b = *(Blob_Set_Index*)void_b_ptr;
+    Blob_List* p = (Blob_List*)void_p;
+    int a_count = p->blob_set[a].stats.count;
+    int b_count = p->blob_set[b].stats.count;
+    return b_count - a_count;
+}
+
+void sort_blobs_by_pixel_count(Blob_List* p) {
+    qsort_r(p->root_list, p->used_root_list_count, sizeof(p->root_list[0]),
+            compare_counts, p);
 }
 
 
@@ -668,7 +723,7 @@ unsigned int copy_best_bounding_boxes(Blob_List* p,
         Blob_Stats* s = &p->blob_set[ii].stats;
         printf("pix_count= %u\n", s->count);
     }
-    shell_sort_blobs_by_pixel_count(p);
+    sort_blobs_by_pixel_count(p);
     printf("AFTER\n");
     for (i = 0; i < p->used_root_list_count; ++i) {
         Blob_Set_Index ii = p->root_list[i];
@@ -692,21 +747,10 @@ void draw_bounding_boxes(const Blob_List* p,
                          int rows,
                          unsigned char yuv[]) {
     int i;
-#define DSC_DEBUG
-#ifdef DSC_DEBUG
-    fprintf(stderr,"============================================\n");
-#endif
-    /* DSC DEBUG */
-    int how_many = p->used_root_list_count;
-    if (how_many > 2) how_many = 2;
-    /* DSC DEBUG END */
-    for (i = 0; i < how_many; ++i) {
+    for (i = 0; i < p->used_root_list_count; ++i) {
         Blob_Set_Index ii = p->root_list[i];
         Blob_Stats* s = &p->blob_set[ii].stats;
         if (s->count >= min_pixels_per_blob) {
-#ifdef DSC_DEBUG
-            fprintf(stderr, "bbox: (%d %d) (%d %d)\n", s->min_x, s->min_y, s->max_x, s->max_y);
-#endif
             const int pixels = cols * rows;
 
             // Draw top and bottom lines.
@@ -756,6 +800,7 @@ void draw_bounding_boxes(const Blob_List* p,
     }
 }
 
+
 Blob_List blob_list_init(Blob_Set_Index max_runs, Blob_Set_Index max_blobs) {
     Blob_List bl;
     bl.blob_set = (Blob_Set_Entry*)malloc(
@@ -775,10 +820,13 @@ Blob_List blob_list_init(Blob_Set_Index max_runs, Blob_Set_Index max_blobs) {
     return bl;
 }
 
+
 void blob_list_deinit(Blob_List* p) {
     free(p->blob_set);
     free(p->root_list);
 }
+
+
 void blob_list_clear(Blob_List* p) {
     p->used_blob_set_count = 1;  // index 0 is reserved
     p->used_root_list_count = 0;
@@ -797,4 +845,15 @@ void blob_list_clear(Blob_List* p) {
     p->blob_set[0].stats.min_y = USHRT_MAX;
     p->blob_set[0].stats.sum_x = 0;
     p->blob_set[0].stats.sum_y = 0;
+}
+
+unsigned long get_total_blob_pixel_count(Blob_List* p) {
+    int i;
+    unsigned long total = 0;
+    for (i = 0; i < p->used_root_list_count; ++i) {
+        Blob_Set_Index ii = p->root_list[i];
+        Blob_Stats* s = &p->blob_set[ii].stats;
+        total += s->count;
+    }
+    return total;
 }

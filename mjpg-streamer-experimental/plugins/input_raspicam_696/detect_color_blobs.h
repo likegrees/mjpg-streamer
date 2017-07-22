@@ -257,6 +257,11 @@ static inline const Blob_Stats* get_blob_stats(const Blob_List* p, int i) {
 }
 
 /**
+ * @brief Return the count of detected pixels across all blobs.
+ */
+unsigned long get_total_blob_pixel_count(Blob_List* p);
+
+/**
  * @brief Sort the blobs contained in the root_list field of the given
  *        Blob_List into declining pixel count order.
  *
@@ -265,7 +270,7 @@ static inline const Blob_Stats* get_blob_stats(const Blob_List* p, int i) {
  * @param p [in,out]   A pointer to a Blob_List, as returned from
  *                     detect_color_blobs().
  */
-void shell_sort_blobs_by_pixel_count(Blob_List* p);
+void sort_blobs_by_pixel_count(Blob_List* p);
 
 unsigned int blob_list_purge_small_bboxes(Blob_List* p,
                                           unsigned int min_pixels_per_blob);
