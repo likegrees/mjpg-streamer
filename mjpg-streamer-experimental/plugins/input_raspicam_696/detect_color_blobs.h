@@ -73,7 +73,7 @@ extern "C" {
  */
 typedef unsigned short Blob_Set_Index;
 
-/** Index into the root_list array of a Blob_List. */
+/** Index into the root_info array of a Blob_List. */
 #define NOT_A_ROOT_LIST_INDEX USHRT_MAX
 typedef unsigned short Root_List_Index;
 
@@ -103,12 +103,17 @@ typedef struct {
  */
 typedef struct {
     /** If this is a root, stats contains a description of the entire blob. */
-    Blob_Stats stats;
+    //Blob_Stats stats;
     Blob_Set_Index parent_index;     /// index into blob_set array
-    Root_List_Index root_list_index; /// index into root_list array
+    Root_List_Index root_list_index; /// index into root_info array
     /** Approximates the log of the number of items rooted at this node. */
     unsigned short rank;
 } Blob_Set_Entry;
+
+typedef struct {
+    Blob_Stats stats;         /// describes entire blob rooted here
+    Blob_Set_Index set_index; /// index to root entry in blob_set_array
+} Root_Info;
 
 
 /**
@@ -139,17 +144,18 @@ typedef struct {
     Blob_Set_Index max_blob_set_count;  /// number of elements in blob_set array
     Blob_Set_Index used_blob_set_count; /// used element in blob_set array
 
-    /** @brief The root_list field contains a list of indices into the
+    /** @brief The root_info field contains a list of indices into the
                blob_set array, one for each Blob_Set_Entry that is the root of
                its own disjoint set.
                
        This allows all the roots to be easily found at the end of processing.
        The list is stored as a densely packed array.  The next available empty
-       entry of root_list is always at &root_list[used_root_list_count]. */
+       entry of root_info is always at &root_info[used_root_list_count]. */
 
-    Blob_Set_Index* root_list;
-    Blob_Set_Index max_root_list_count;/// number of elements in root_list array
-    Blob_Set_Index used_root_list_count; /// used element in root_list array
+    //Blob_Set_Index* root_list;
+    Root_Info* root_info;
+    Blob_Set_Index max_root_list_count;/// number of elements in root_info array
+    Blob_Set_Index used_root_list_count; /// used element in root_info array
 } Blob_List;
 
 
@@ -244,6 +250,7 @@ int detect_color_blobs(Blob_List* p,
                        int rows,
                        unsigned char yuv[]);
 
+#if 0
 /**
  * @brief Return statistics on the iTH color blob in the given Blob_List.
  *
@@ -253,8 +260,10 @@ int detect_color_blobs(Blob_List* p,
  * @return A pointer to the statistics for the specified blob.
  */
 static inline const Blob_Stats* get_blob_stats(const Blob_List* p, int i) {
-    return &p->blob_set[p->root_list[i]].stats;
+    //return &p->blob_set[p->root_list[i]].stats;
+    return &root_info[i].stats;
 }
+#endif
 
 /**
  * @brief Return the count of detected pixels across all blobs.
@@ -262,11 +271,11 @@ static inline const Blob_Stats* get_blob_stats(const Blob_List* p, int i) {
 unsigned long get_total_blob_pixel_count(Blob_List* p);
 
 /**
- * @brief Sort the blobs contained in the root_list field of the given
+ * @brief Sort the blobs contained in the root_info array of the given
  *        Blob_List into declining pixel count order.
  *
- * After this call, the largest blob will be found in p->root_list[0], second
- * largest in p->root_list[1], etc.
+ * After this call, the largest blob will be found in p->root_info[0], second
+ * largest in p->root_info[1], etc.
  * @param p [in,out]   A pointer to a Blob_List, as returned from
  *                     detect_color_blobs().
  */

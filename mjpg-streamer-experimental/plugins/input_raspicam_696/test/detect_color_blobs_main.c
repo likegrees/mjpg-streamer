@@ -132,10 +132,10 @@ static double delta_time(struct timespec* a_ptr, struct timespec* b_ptr) {
            (b_ptr->tv_nsec - a_ptr->tv_nsec) / 1000000000.0;
 }
 
-static void dump_blob_set_stats(Blob_List* p, int index) {
-    const Blob_Stats* s = &p->blob_set[index].stats;
+static void dump_root_info_stats(Blob_List* p, int index) {
+    const Blob_Stats* s = &p->root_info[index].stats;
     fprintf(stderr,
-"set %3hu: bbox (%5d %5d) (%5d %5d) cnt %6d sum (%7d %7d) center (%5d %5d)\n",
+"root %3hu: bbox (%5d %5d) (%5d %5d) cnt %6d sum (%7d %7d) center (%5d %5d)\n",
             index, s->min_x, s->min_y, s->max_x, s->max_y, s->count,
             s->sum_x, s->sum_y,
             (s->sum_x + s->count / 2) / s->count,
@@ -205,15 +205,13 @@ int main(int argc, const char* argv[]) {
     int ii;
     fprintf(stderr, "All blobs:\n");
     for (ii = 0; ii < bl.used_root_list_count; ++ii) {
-        int ss = bl.root_list[ii];
-        dump_blob_set_stats(&bl, ss);
+        dump_root_info_stats(&bl, ii);
     }
     sort_blobs_by_pixel_count(&bl);
 
     fprintf(stderr, "Sorted blobs:\n");
     for (ii = 0; ii < bl.used_root_list_count; ++ii) {
-        int ss = bl.root_list[ii];
-        dump_blob_set_stats(&bl, ss);
+        dump_root_info_stats(&bl, ii);
     }
 
     unsigned char red[3] = { 255, 0, 255 };
