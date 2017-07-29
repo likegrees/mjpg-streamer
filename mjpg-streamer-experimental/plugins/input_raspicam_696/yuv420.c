@@ -70,7 +70,8 @@ Yuv_File yuv420_open_read(const char* filename) {
         file.rows = 0;
         return file;
     }
-    int items = sscanf(header, "#!YUV420 %u,%u", &file.cols, &file.rows);
+    int items = sscanf((const char*)header, "#!YUV420 %u,%u",
+                       &file.cols, &file.rows);
     if (items != 2) {
         fclose(file.fp);
         file.fp = NULL;

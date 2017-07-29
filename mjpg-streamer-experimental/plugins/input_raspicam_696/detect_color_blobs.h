@@ -204,7 +204,11 @@ void blob_list_deinit(Blob_List* p);
  *                                       image.
  * @param y_low [in]                     The minimum acceptable Y color value
  *                                       for a pixel to considered part of a
- *                                       blob.
+ *                                       blob.  Note that there is no y_high.
+ *                                       Supporting y_high slows the code by
+ *                                       about 20 per cent.  Since it isn't
+ *                                       useful for our application, we left it
+ *                                       out.
  * @param u_low [in]                     The minimum U color value.
  * @param u_high [in]                    The maximum U color value.
  * @param v_low [in]                     The minimum V color value.
@@ -236,19 +240,17 @@ void blob_list_deinit(Blob_List* p);
  *                                       color thresholds specified by y_low,
  *                                       u_low, etc.  Otherwise, the image is
  *                                       left unchanged.
- * @return Zero on success; -1 on failure.  Failure occurs iff not enough
- *         memory can be allocated.
  */
-int detect_color_blobs(Blob_List* p,
-                       unsigned char y_low,
-                       unsigned char u_low,
-                       unsigned char u_high,
-                       unsigned char v_low,
-                       unsigned char v_high,
-                       bool highlight_detected_pixels,
-                       int cols,
-                       int rows,
-                       unsigned char yuv[]);
+void detect_color_blobs(Blob_List* p,
+                        unsigned char y_low,
+                        unsigned char u_low,
+                        unsigned char u_high,
+                        unsigned char v_low,
+                        unsigned char v_high,
+                        bool highlight_detected_pixels,
+                        int cols,
+                        int rows,
+                        unsigned char yuv[]);
 
 #if 0
 /**

@@ -1,7 +1,13 @@
 #gcc -Wall -o detect_color_blobs -DDCB_DEBUG -I .. -g detect_color_blobs_main.c ../detect_color_blobs.c ../yuv420.c -ljpeg
-#gcc -o detect_color_blobs -O2 -I .. -g detect_color_blobs_main.c ../detect_color_blobs.c ../yuv420.c -ljpeg
 
-gcc -pg -o detect_color_blobs -O2 -I .. -g detect_color_blobs_main.c ../detect_color_blobs.c ../yuv420.c -ljpeg
+
+# Profile to improve branch prediction.  This only gets ~2% speed-up.
+#1
+#gcc -fprofile-generate -Wall -o detect_color_blobs -O2 -I .. -g detect_color_blobs_main.c ../detect_color_blobs.c ../yuv420.c -ljpeg
+#2
+#gcc -fprofile-use -Wall -o detect_color_blobs -O2 -I .. -g detect_color_blobs_main.c ../detect_color_blobs.c ../yuv420.c -ljpeg
+
+gcc -o detect_color_blobs -O2 -I .. -g detect_color_blobs_main.c ../detect_color_blobs.c ../yuv420.c -ljpeg
 
 
 

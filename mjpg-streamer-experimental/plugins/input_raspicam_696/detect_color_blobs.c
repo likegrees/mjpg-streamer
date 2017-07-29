@@ -122,6 +122,11 @@ typedef struct {
     unsigned short run_high; // one past
 } Uv_Run;
 
+#define SIMPLE2
+#ifdef SIMPLE2
+/* This version is simpler and runs at the same speed, so let't go with this
+   one. */
+
 /* Return true if pixel jj within the given uv_row has both u and v values
    within threshold. */
 static inline bool uv_is_in(int pixels,
@@ -139,13 +144,13 @@ static inline bool uv_is_in(int pixels,
 
 /* Run through a single row of u and v values; for any pixel that is within
    threshold for both u and v, add it to a new uv_run entry. */
-static unsigned int create_uv_run_sequence(int cols,
-                                           int rows,
-                                           unsigned char uv_row[],
-                                           unsigned char u_low,
-                                           unsigned char u_high,
-                                           unsigned char v_low,
-                                           unsigned char v_high,
+static unsigned int create_uv_run_sequence(const int cols,
+                                           const int rows,
+                                           const unsigned char uv_row[],
+                                           const unsigned char u_low,
+                                           const unsigned char u_high,
+                                           const unsigned char v_low,
+                                           const unsigned char v_high,
                                            Uv_Run uv_run[]) {
     int uv_run_count = 0;
     const int pixels = cols * rows;
@@ -168,6 +173,51 @@ static unsigned int create_uv_run_sequence(int cols,
     }
     return uv_run_count;
 }
+#else
+
+/* Run through a single row of u and v values; for any pixel that is within
+   threshold for both u and v, add it to a new uv_run entry. */
+static unsigned int create_uv_run_sequence(const int cols,
+                                           const int rows,
+                                           const unsigned char uv_row[],
+                                           const unsigned char u_low,
+                                           const unsigned char u_high,
+                                           const unsigned char v_low,
+                                           const unsigned char v_high,
+                                           Uv_Run uv_run[]) {
+    int uv_run_count = 0;
+    const int pixels = cols * rows;
+    int jj = 0;
+    const unsigned char* end_u_ptr = &uv_row[cols / 2];
+    const unsigned char* u_ptr = &uv_row[0];
+    const unsigned char* v_ptr = &uv_row[pixels / 4];
+    while (u_ptr < end_u_ptr) {
+        if (*u_ptr >= u_low && *u_ptr <= u_high &&
+            *v_ptr >= v_low && *v_ptr <= v_high) {
+            /* Start new run. */
+            uv_run[uv_run_count].run_low = jj;
+            jj += 2;
+            ++u_ptr;
+            ++v_ptr;
+            while (u_ptr < end_u_ptr &&
+                   (*u_ptr >= u_low && *u_ptr <= u_high &&
+                    *v_ptr >= v_low && *v_ptr <= v_high)) {
+                jj += 2;
+                ++u_ptr;
+                ++v_ptr;
+            }
+            /* Stop the run. */
+            uv_run[uv_run_count].run_high = jj - 1;
+            ++uv_run_count;
+        } else {
+            jj += 2;
+            ++u_ptr;
+            ++v_ptr;
+        }
+    }
+    return uv_run_count;
+}
+#endif
 
 /**************************************
  ****                              ****
@@ -303,6 +353,8 @@ static void set_parent(Blob_List* p,
 }
 
 
+//#define SIMPLE1
+#ifdef SIMPLE1
 /**
  * @brief Return the root of the blob which contains the given blob_set index.
  *
@@ -322,6 +374,45 @@ static Blob_Set_Index find_root(Blob_List* p, Blob_Set_Index index) {
     DPRINT(" is %d\n", parent);
     return parent;
 }
+#else
+
+/* The time required to run this version and the SIMPLE1 version are the same.
+   I like the debugging outputs on this one, however, so we'll go with it. */
+
+static Blob_Set_Index find_root_recursive(Blob_List* p,
+                                          const Blob_Set_Index index) {
+    Blob_Set_Index parent = index;
+    assert(index < p->used_blob_set_count);
+    DPRINT(" of set %d", index);
+    if (p->blob_set[index].parent_index != index) {
+        parent = find_root_recursive(p, p->blob_set[index].parent_index);
+        set_parent(p, index, parent);
+    }
+    return parent;
+}
+
+/**
+ * @brief Return the root of the blob which contains the given blob_set index.
+ *
+ * @param p [in,out]      Pointer to the Blob_List containing blob_set.
+ * @param index [in]      Index of the entry of interest within blob_set.
+ * @return The index of the root.
+ */
+static inline Blob_Set_Index find_root(Blob_List* p,
+                                       const Blob_Set_Index index) {
+    assert(index < p->used_blob_set_count);
+    DPRINT("   find_root of set %d", index);
+    Blob_Set_Index parent = p->blob_set[index].parent_index;
+    if (parent == index) {
+        DPRINT(" is %d\n", index);
+        return index;
+    }
+    Blob_Set_Index root = find_root_recursive(p, parent);
+    set_parent(p, index, root);
+    DPRINT(" is %d\n", root);
+    return root;
+}
+#endif
 
 /**
  * @brief Link together the blobs rooted at s_index and t_index into a single
@@ -539,16 +630,16 @@ static void yuv_run_row_union(Blob_List* p,
 }
 
 
-int detect_color_blobs(Blob_List* p,
-                       unsigned char y_low,
-                       unsigned char u_low,
-                       unsigned char u_high,
-                       unsigned char v_low,
-                       unsigned char v_high,
-                       bool highlight_detected_pixels,
-                       int cols,
-                       int rows,
-                       unsigned char yuv[]) {
+void detect_color_blobs(Blob_List* p,
+                        unsigned char y_low,
+                        unsigned char u_low,
+                        unsigned char u_high,
+                        unsigned char v_low,
+                        unsigned char v_high,
+                        bool highlight_detected_pixels,
+                        int cols,
+                        int rows,
+                        unsigned char yuv[]) {
     /* Allocate memory for intermediate results. */
 
     int ii;
@@ -640,8 +731,6 @@ int detect_color_blobs(Blob_List* p,
     free(yuv_run1);
     free(yuv_run0);
     free(uv_run);
-
-    return 0;
 }
 
 static int compare_counts(const void* void_a_ptr,

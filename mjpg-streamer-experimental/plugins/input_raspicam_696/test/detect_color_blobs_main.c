@@ -135,7 +135,7 @@ static double delta_time(struct timespec* a_ptr, struct timespec* b_ptr) {
 static void dump_root_info_stats(Blob_List* p, int index) {
     const Blob_Stats* s = &p->root_info[index].stats;
     fprintf(stderr,
-"root %3hu: bbox (%5d %5d) (%5d %5d) cnt %6d sum (%7d %7d) center (%5d %5d)\n",
+"root %3hu: bbox (%5d %5d) (%5d %5d) cnt %6d sum (%7lu %7lu) center (%5lu %5lu)\n",
             index, s->min_x, s->min_y, s->max_x, s->max_y, s->count,
             s->sum_x, s->sum_y,
             (s->sum_x + s->count / 2) / s->count,
@@ -151,7 +151,7 @@ int main(int argc, const char* argv[]) {
 
     const char* in_fn = argv[1];
     int y_low = atoi(argv[2]);
-    int y_high = atoi(argv[3]);
+    //int y_high = atoi(argv[3]);
     int u_low = atoi(argv[4]);
     int u_high = atoi(argv[5]);
     int v_low = atoi(argv[6]);
@@ -198,8 +198,13 @@ int main(int argc, const char* argv[]) {
 #define MAX_RUNS 10000
 #define MAX_BLOBS 1000
     Blob_List bl = blob_list_init(MAX_RUNS, MAX_BLOBS);
-    int err_no = detect_color_blobs(&bl, y_low, u_low, u_high, v_low, v_high,
-                                    true, cols, rows, yuv);
+#ifdef DCB_DEBUG
+    bool highlight_detected_pixels = true;
+#else
+    bool highlight_detected_pixels = false;
+#endif
+    detect_color_blobs(&bl, y_low, u_low, u_high, v_low, v_high,
+                       highlight_detected_pixels, cols, rows, yuv);
     clock_gettime(CLOCK_REALTIME, &end_time);
 
     int ii;
@@ -219,7 +224,7 @@ int main(int argc, const char* argv[]) {
 
     double elapsed_secs = delta_time(&start_time, &end_time);
     fprintf(stderr,
-            "cr=( %d %d ) total_pixels= %u elapsed_secs= %.6f %.3f Hz\n",
+            "cr=( %d %d ) total_pixels= %lu elapsed_secs= %.6f %.3f Hz\n",
             cols, rows, get_total_blob_pixel_count(&bl), elapsed_secs,
             1.0 / elapsed_secs);
     blob_list_deinit(&bl);
