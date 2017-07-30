@@ -10,6 +10,8 @@ MJPG_STREAMER_PLUGIN_OPTION(input_raspicam "Team 696 Raspberry Pi input camera p
                             ONLYIF HAS_RASPI)
 
 if (PLUGIN_INPUT_RASPICAM)
+    SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2")
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
     include_directories(/opt/vc/include)
     include_directories(/opt/vc/include/interface/vcos)
     include_directories(/opt/vc/include/interface/vcos/pthreads)
@@ -20,7 +22,7 @@ if (PLUGIN_INPUT_RASPICAM)
 
     link_directories(/opt/vc/lib)
 
-    MJPG_STREAMER_PLUGIN_COMPILE(input_raspicam_696 input_raspicam_696.c overwrite_tif_tags.c detect_color_blobs.c)
+    MJPG_STREAMER_PLUGIN_COMPILE(input_raspicam_696 input_raspicam_696.c overwrite_tif_tags.c detect_color_blobs.c yuv_color_space_image.c)
 
     target_link_libraries(input_raspicam_696 mmal_core mmal_util mmal_vc_client vcos bcm_host)
 

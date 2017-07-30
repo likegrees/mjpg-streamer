@@ -52,6 +52,7 @@
 #include "mmal/util/mmal_util.h"
 #include "overwrite_tif_tags.h"
 #include "detect_color_blobs.h"
+#include "yuv_color_space_image.h"
 
 #include "RaspiCamControl.c"
 
@@ -91,6 +92,8 @@ typedef struct {
     bool detect_yuv;
     bool yuv_write;
     bool jpg_write;
+    int test_img_y_value;
+    unsigned char* test_img;
     unsigned char blob_yuv_min[3];
     unsigned char blob_yuv_max[3];
     unsigned int frame_no;
@@ -115,6 +118,8 @@ static init_splitter_callback_data(Splitter_Callback_Data* p) {
     p->pool_ptr = NULL;
     p->jpg_write = false;
     p->yuv_write = false;
+    p->test_img_y_value = -1;
+    p->test_img = NULL;
     p->yuv_fp = NULL;
     p->bbox_element_count = 0;
     pthread_mutex_init(&p->bbox_mutex, NULL);
@@ -233,6 +238,7 @@ int input_init(input_parameter *param, int plugin_no)
       {"blobyuv", required_argument, 0, 0},           // 32
       {"writeyuv", no_argument, 0, 0},                // 33
       {"writejpg", no_argument, 0, 0},                // 34
+      {"testimg", required_argument, 0, 0},           // 35
       {0, 0, 0, 0}
     };
 
@@ -417,6 +423,13 @@ int input_init(input_parameter *param, int plugin_no)
         //writejpg
         splitter_callback_data.jpg_write = true;
         break;
+      case 35:
+        sscanf(optarg, "%d", &splitter_callback_data.test_img_y_value);
+        if (splitter_callback_data.test_img_y_value > 255) {
+            splitter_callback_data.test_img_y_value = 255;
+        }
+        //testimg
+        break;
       default:
         DBG("default case\n");
         help();
@@ -493,13 +506,17 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
             pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length, port->format->es->video.width, port->format->es->video.height);
 
     if (pData != NULL) {
+        unsigned char* img = buffer->data;
         mmal_buffer_header_mem_lock(buffer);
+        if (splitter_callback_data.test_img != NULL) {
+            img = splitter_callback_data.test_img;
+        }
         if (pData->detect_yuv) {
             detect_color_blobs(&pData->blob_list, pData->blob_yuv_min[0],
                     pData->blob_yuv_min[1], pData->blob_yuv_max[1],
                     pData->blob_yuv_min[2], pData->blob_yuv_max[2],
                     false, port->format->es->video.width,
-                    port->format->es->video.height, buffer->data);
+                    port->format->es->video.height, img);
 #define MIN_PIXELS_PER_BLOB 30
             (void)blob_list_purge_small_bboxes(&pData->blob_list,
                                                MIN_PIXELS_PER_BLOB);
@@ -512,7 +529,8 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
         }
         mmal_buffer_header_mem_unlock(buffer);
         if (pData->yuv_fp != NULL) {
-            fwrite(buffer->data, 1, buffer->length, pData->yuv_fp);
+            //fwrite(buffer->data, 1, buffer->length, pData->yuv_fp);
+            fwrite(img, 1, buffer->length, pData->yuv_fp);
         }
     } else {
         LOG_ERROR("Received a camera buffer callback with no state");
@@ -1350,7 +1368,8 @@ void *worker_thread(void *arg)
   // Set up optional splitter component
 
   status = MMAL_SUCCESS;
-  if (splitter_callback_data.detect_yuv || splitter_callback_data.yuv_fp != NULL)
+  if (splitter_callback_data.detect_yuv ||
+      splitter_callback_data.yuv_fp != NULL)
   {
       splitter_pair = create_splitter_component(camera);
       if (splitter_pair.component_ptr == NULL) status = MMAL_ENOSYS;
@@ -1437,6 +1456,13 @@ void *worker_thread(void *arg)
         splitter_callback_data.yuv_fp = fopen(filename, "wb");
         fprintf(splitter_callback_data.yuv_fp,
                 "#!YUV420 %7u,%7u\n", width, height);
+    }
+    if (splitter_callback_data.test_img_y_value >= 0) {
+        splitter_callback_data.test_img = (unsigned char*)malloc(
+                                                       width * height * 3 / 2);
+        yuv_color_space_image(width, height,
+                              splitter_callback_data.test_img_y_value,
+                              splitter_callback_data.test_img);
     }
     status = mmal_port_enable(splitter_callback_port, splitter_buffer_callback);
     if (status != MMAL_SUCCESS)
