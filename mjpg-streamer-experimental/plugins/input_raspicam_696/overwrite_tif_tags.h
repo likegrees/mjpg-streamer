@@ -52,8 +52,11 @@
  * @brief Overwrite the existing tiff headers with Team 696 bounding box
  *        information.
  *
- * @param cols [in]             The number of columns in the image.
- * @param rows [in]             The number of rows in the image.
+ * @param width [in]            The number of columns in the unresized image.
+ * @param height [in]           The number of rows in the unresized image.
+ * @param vwidth [in]           The number of columns in the resized video
+ *                              image.
+ * @param vheight [in]          The number of rows in the resized video image.
  * @param bbox_coord_count [in] The number of elements in the bbox_coord array.
  *                              This is truncated down in this routine to fit
  *                              in the available space, and to be a multiple of
@@ -71,8 +74,10 @@
  *         buf does not point to a valid JPEG header, or if there is not
  *         enough space in the header to hold the minimal set of TIF tags.
  */
-int overwrite_tif_tags(unsigned int cols,
-                       unsigned int rows,
+int overwrite_tif_tags(unsigned int width,
+                       unsigned int height,
+                       unsigned int vwidth,
+                       unsigned int vheight,
                        unsigned short bbox_coord_count,
                        unsigned short bbox_coord[],
                        unsigned char buf[]);

@@ -136,8 +136,10 @@ void worker_cleanup(void *);
 void help(void);
 
 static int fps = 5;
-static int width = 640;
-static int height = 480;
+static int width = -1;
+static int height = -1;
+static int vwidth = -1;
+static int vheight = -1;
 static int quality = 85;
 static int usestills = 0;
 static int wantPreview = 0;
@@ -158,6 +160,8 @@ typedef struct
   unsigned int frame_no;
   unsigned int width;
   unsigned int height;
+  unsigned int vwidth;
+  unsigned int vheight;
 } PORT_USERDATA;
 
 
@@ -239,6 +243,8 @@ int input_init(input_parameter *param, int plugin_no)
       {"writeyuv", no_argument, 0, 0},                // 33
       {"writejpg", no_argument, 0, 0},                // 34
       {"testimg", required_argument, 0, 0},           // 35
+      {"vwidth", required_argument, 0, 0},            // 36
+      {"vheight", required_argument, 0, 0},           // 37
       {0, 0, 0, 0}
     };
 
@@ -430,12 +436,29 @@ int input_init(input_parameter *param, int plugin_no)
         }
         //testimg
         break;
+        /* vwidth */
+      case 36:
+        vwidth = atoi(optarg);
+        vwidth = VCOS_ALIGN_UP(vwidth, 32); // DSC
+        break;
+        /* height */
+      case 37:
+        vheight = atoi(optarg);
+        vheight = VCOS_ALIGN_UP(vheight, 16); // DSC
+        break;
       default:
         DBG("default case\n");
         help();
         return 1;
     }
   }
+
+  if (vwidth < 0 && width < 0) width = 640;
+  if (vheight < 0 && height < 0) height = 480;
+  if (vwidth < 0) vwidth = width;
+  if (vheight < 0) vheight = height;
+  if (width < 0) width = vwidth;
+  if (height < 0) height = vheight;
 
   pglobal = param->global;
 
@@ -590,14 +613,13 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
           /* Send the bounding boxes in the image packets by overwriting the
              tiff tags in the header supplied by Broadcom. */
 
-          unsigned int cols = pData->width;
-          unsigned int rows = pData->height;
           const unsigned int SIZE_FIELD_OFFSET = 4;
           unsigned int total_header_bytes = SIZE_FIELD_OFFSET +
                       (((unsigned int)buffer->data[4] << 8) | buffer->data[5]);
           const unsigned int TIFF_TAGS_OFFSET = 12;
           pthread_mutex_lock(&pData->splitter_data_ptr->bbox_mutex);
-          overwrite_tif_tags(cols, rows,
+          overwrite_tif_tags(pData->width, pData->height, pData->vwidth,
+                             pData->vheight,
                              pData->splitter_data_ptr->bbox_element_count,
                              pData->splitter_data_ptr->bbox_element,
                              buffer->data);
@@ -743,6 +765,129 @@ static void camera_control_callback(MMAL_PORT_T *port,
 
     mmal_buffer_header_release(buffer);
 }
+
+/**
+ * Create the resizer component, set up its ports
+ *
+ * @param camera_component Pointer to camera component
+ *
+ * @return The newly created resizer component and pool.  On failure
+ *         Component_Pool.component_ptr will be NULL, and the error will be
+ *         logged.
+ *
+ */
+static Component_Pool create_resizer_component(
+                                        MMAL_COMPONENT_T* camera_component,
+                                        int width,
+                                        int height)
+{
+   Component_Pool pair = { NULL, NULL };
+   MMAL_COMPONENT_T *resizer = 0;
+   MMAL_PORT_T *resizer_output = NULL;
+   MMAL_ES_FORMAT_T *format;
+   MMAL_STATUS_T status;
+   MMAL_POOL_T *pool;
+   int i;
+
+   if (camera_component == NULL) {
+      status = MMAL_ENOSYS;
+      LOG_ERROR("Camera component must be created before resizer");
+      log_mmal_status(status);
+      goto error;
+   }
+
+   /* Create the component */
+
+
+#define MMAL_COMPONENT_RESIZER "vc.ril.resize"
+//#define MMAL_COMPONENT_RESIZER "vc.ril.isp"
+   status = mmal_component_create(MMAL_COMPONENT_RESIZER, &resizer);
+
+   if (status != MMAL_SUCCESS) {
+      LOG_ERROR("Failed to create resizer component");
+      log_mmal_status(status);
+      goto error;
+   }
+
+   if (resizer->input_num == 0) {
+      status = MMAL_ENOSYS;
+      LOG_ERROR("resizer doesn't have any input port");
+      log_mmal_status(status);
+      goto error;
+   }
+
+   if (resizer->output_num == 0) {
+      status = MMAL_ENOSYS;
+      LOG_ERROR("resizer doesn't have enough output ports");
+      log_mmal_status(status);
+      goto error;
+   }
+
+   /* Ensure there are enough buffers to avoid dropping frames: */
+   mmal_format_copy(resizer->input[0]->format,
+                    camera_component->output[MMAL_CAMERA_VIDEO_PORT]->format);
+
+
+   if (resizer->input[0]->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
+      resizer->input[0]->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+   }
+   status = mmal_port_format_commit(resizer->input[0]);
+
+   if (status != MMAL_SUCCESS) {
+      LOG_ERROR("Unable to set format on resizer input port");
+      log_mmal_status(status);
+      goto error;
+   }
+
+   /* resizer can do format conversions, configure format for its output port: */
+   mmal_format_copy(resizer->output[0]->format, resizer->input[0]->format);
+   if (resizer->output[0]->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
+      resizer->output[0]->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+   }
+
+   /* Here is where we change the size. */
+
+   width = VCOS_ALIGN_UP(width, 32);
+   height = VCOS_ALIGN_UP(height, 16);
+   resizer->output[0]->format->es->video.width = width;
+   resizer->output[0]->format->es->video.height = height;
+   resizer->output[0]->format->es->video.crop.width = width;
+   resizer->output[0]->format->es->video.crop.height = height;
+   status = mmal_port_format_commit(resizer->output[0]);
+
+   if (status != MMAL_SUCCESS) {
+      LOG_ERROR("Unable to set format on resizer output port %d", i);
+      log_mmal_status(status);
+      goto error;
+   }
+
+   /* Enable component */
+   status = mmal_component_enable(resizer);
+
+   if (status != MMAL_SUCCESS) {
+      LOG_ERROR("resizer component couldn't be enabled");
+      log_mmal_status(status);
+      goto error;
+   }
+
+   /* Create pool of buffer headers for the output port to consume */
+   resizer_output = resizer->output[0];
+   pool = mmal_port_pool_create(resizer_output, resizer_output->buffer_num,
+                                resizer_output->buffer_size);
+
+   if (!pool) {
+      LOG_ERROR("Failed to create buffer header pool for resizer output port %s", resizer_output->name);
+   }
+
+   pair.pool_ptr = pool;
+   pair.component_ptr = resizer;
+   return pair;
+
+error:
+   if (resizer) mmal_component_destroy(resizer);
+   return pair;
+}
+
 
 
 /**
@@ -1039,6 +1184,10 @@ void *worker_thread(void *arg)
   // Splitter variables
   Component_Pool splitter_pair;
   MMAL_CONNECTION_T *splitter_connection = NULL;
+
+  // Resizer variables
+  Component_Pool resizer_pair;
+  MMAL_CONNECTION_T *resizer_connection = NULL;
 
   //fps count
   struct timespec t_start, t_finish;
@@ -1435,12 +1584,19 @@ void *worker_thread(void *arg)
     }
   } 
 
+  resizer_pair = create_resizer_component(camera, vwidth, vheight);
+
   // Now connect the camera to the encoder
   if (status == MMAL_SUCCESS) {
     if(usestills){
       status = connect_ports(camera_still_port, encoder->input[0], &encoder_connection);
     } else {
+#if 0
       status = connect_ports(camera_video_port, encoder->input[0], &encoder_connection);
+#else
+      status = connect_ports(camera_video_port, resizer_pair.component_ptr->input[0], &resizer_connection);
+      status = connect_ports(resizer_pair.component_ptr->output[0], encoder->input[0], &encoder_connection);
+#endif
     }
   }
 
@@ -1482,6 +1638,9 @@ void *worker_thread(void *arg)
     if (encoder_connection) {
       mmal_connection_destroy(encoder_connection);
     }
+    if (resizer_connection) {
+      mmal_connection_destroy(resizer_connection);
+    }
     if (preview) {
       mmal_component_destroy(preview);
     }
@@ -1498,8 +1657,10 @@ void *worker_thread(void *arg)
   callback_data.pool = pool;
   callback_data.offset = 0;
   callback_data.frame_no = 0;
-  callback_data.width = width;   // width of encode image
-  callback_data.height = height; // height of encode image
+  callback_data.width = width;   // width of original image
+  callback_data.height = height; // height of original image
+  callback_data.vwidth = vwidth;   // width of encode image
+  callback_data.vheight = vheight; // height of encode image
   callback_data.splitter_data_ptr = &splitter_callback_data;
 
   vcos_assert(vcos_semaphore_create(&callback_data.complete_semaphore, "RaspiStill-sem", 0) == VCOS_SUCCESS);

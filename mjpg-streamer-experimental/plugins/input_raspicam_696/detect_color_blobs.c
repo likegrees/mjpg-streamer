@@ -771,7 +771,6 @@ unsigned int blob_list_purge_small_bboxes(Blob_List* p,
             ++rx;
         }
     }
-    printf("removed %d small blobs\n", p->used_root_list_count - ok_count);
     p->used_root_list_count = ok_count;
     return ok_count;
 }
@@ -783,13 +782,10 @@ unsigned int copy_best_bounding_boxes(Blob_List* p,
                                       unsigned short bbox_element[]) {
     int i;
     int k = 0;
-    printf("BEFORE\n");
     for (i = 0; i < p->used_root_list_count; ++i) {
         Blob_Stats* s = &p->root_info[i].stats;
-        printf("pix_count= %u\n", s->count);
     }
     sort_blobs_by_pixel_count(p);
-    printf("AFTER\n");
     for (i = 0; i < p->used_root_list_count; ++i) {
         Blob_Stats* s = &p->root_info[i].stats;
         printf("pix_count= %u\n", s->count);

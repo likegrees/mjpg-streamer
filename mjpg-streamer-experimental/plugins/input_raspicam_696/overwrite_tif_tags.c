@@ -48,11 +48,13 @@
  *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include "overwrite_tif_tags.h"
-int overwrite_tif_tags(unsigned int cols,
-                      unsigned int rows,
-                      unsigned short bbox_coord_count, 
-                      unsigned short bbox_coord[],
-                      unsigned char* buf) {
+int overwrite_tif_tags(unsigned int width,
+                       unsigned int height,
+                       unsigned int vwidth,
+                       unsigned int vheight,
+                       unsigned short bbox_coord_count, 
+                       unsigned short bbox_coord[],
+                       unsigned char* buf) {
 
     /* Check the 1st four bytes to make sure this is a JPEG header. */
 
@@ -120,10 +122,10 @@ int overwrite_tif_tags(unsigned int cols,
     byte[15] = 0x00;
     byte[16] = 0x00;
     byte[17] = 0x01;
-    byte[18] = (cols & 0xff000000) >> 24;  // column count (4 bytes)
-    byte[19] = (cols & 0x00ff0000) >> 16;
-    byte[20] = (cols & 0x0000ff00) >> 8;
-    byte[21] = (cols & 0x000000ff);
+    byte[18] = (vwidth & 0xff000000) >> 24;  // column count (4 bytes)
+    byte[19] = (vwidth & 0x00ff0000) >> 16;
+    byte[20] = (vwidth & 0x0000ff00) >> 8;
+    byte[21] = (vwidth & 0x000000ff);
 
     // IFD 1: Rows in image
 
@@ -135,10 +137,10 @@ int overwrite_tif_tags(unsigned int cols,
     byte[27] = 0x00;
     byte[28] = 0x00;
     byte[29] = 0x01;
-    byte[30] = (rows & 0xff000000) >> 24;  // row count (4 bytes)
-    byte[31] = (rows & 0x00ff0000) >> 16;
-    byte[32] = (rows & 0x0000ff00) >> 8;
-    byte[33] = (rows & 0x000000ff);
+    byte[30] = (vheight & 0xff000000) >> 24;  // row count (4 bytes)
+    byte[31] = (vheight & 0x00ff0000) >> 16;
+    byte[32] = (vheight & 0x0000ff00) >> 8;
+    byte[33] = (vheight & 0x000000ff);
 
     // IFD 2: BBox data
 
@@ -164,11 +166,22 @@ int overwrite_tif_tags(unsigned int cols,
 
     // Bbox coords
 
+    float width_ratio = (float)vwidth / width;
+    float height_ratio = (float)vheight / height;
     unsigned short ii;
     unsigned char* p = &byte[BYTE_OFFSET_OF_BBOX_DATA];
-    for (ii = 0; ii < bbox_coord_count; ++ii) {
-        *(p++) = (bbox_coord[ii] & 0xff00) >> 8;
-        *(p++) = (bbox_coord[ii] & 0x00ff);
+    for (ii = 0; ii < bbox_coord_count / 2; ++ii) {
+        // Convert detect color blobs image coordinates to video image coords.
+
+        unsigned short x = (bbox_coord[2 * ii] * width_ratio + 0.5);
+        unsigned short y = (bbox_coord[2 * ii + 1] * height_ratio + 0.5);
+
+        // Output x and y in network byte order.
+
+        *(p++) = (x & 0xff00) >> 8;
+        *(p++) = (x & 0x00ff);
+        *(p++) = (y & 0xff00) >> 8;
+        *(p++) = (y & 0x00ff);
     }
 
     // Clear unused bytes at end
