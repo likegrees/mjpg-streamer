@@ -64,6 +64,11 @@
  * @param bbox_coord [in]       The bounding box coordinates.  Each bounding
  *                              box requires 4 coordinates in this order:
  *                              x_min, y_min, x_max, y_max.
+ * @param exposure [in]         Camera exposure.
+ * @param analog_gain [in]      Camera analog gain.
+ * @param digital_gain [in]     Camera digital gain.
+ * @param awb_red_gain [in]     Camera auto white balance red gain.
+ * @param awb_blue_gain [in]    Camera auto white balance blue gain.
  * @param buf [in,out]          Points to the start of the JPEG header.  The
  *                              size of the header is encoded in the header
  *                              itself.  This routine writes over the TIF tags
@@ -80,4 +85,9 @@ int overwrite_tif_tags(unsigned int width,
                        unsigned int vheight,
                        unsigned short bbox_coord_count,
                        unsigned short bbox_coord[],
-                       unsigned char buf[]);
+                       unsigned int exposure,
+                       float analog_gain,
+                       float digital_gain,
+                       float awb_red_gain,
+                       float awb_blue_gain,
+                       unsigned char* buf);

@@ -48,12 +48,32 @@
  *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #include "overwrite_tif_tags.h"
+
+/**
+ * @brief Write out a float value to addr in network byte order.
+ */
+static void copy_float_to_nbo(float gain, unsigned char* addr) {
+    // Convert float to unsigned int.
+    unsigned int* pint = (unsigned int*)&gain;
+
+    // Write out bytes in network byte order.
+    *(addr++) = (*pint & 0xff000000) >> 24;
+    *(addr++) = (*pint & 0x00ff0000) >> 16;
+    *(addr++) = (*pint & 0x0000ff00) >> 8;
+    *(addr++) = (*pint & 0x000000ff);
+}
+
 int overwrite_tif_tags(unsigned int width,
                        unsigned int height,
                        unsigned int vwidth,
                        unsigned int vheight,
                        unsigned short bbox_coord_count, 
                        unsigned short bbox_coord[],
+                       unsigned int exposure,
+                       float analog_gain,
+                       float digital_gain,
+                       float awb_red_gain,
+                       float awb_blue_gain,
                        unsigned char* buf) {
 
     /* Check the 1st four bytes to make sure this is a JPEG header. */
@@ -81,11 +101,14 @@ int overwrite_tif_tags(unsigned int width,
 
     unsigned short byte_count = total_header_bytes - TIFF_TAGS_OFFSET;
 
-    const unsigned short BYTE_OFFSET_OF_BBOX_DATA = 50;
+    const unsigned short BYTE_OFFSET_OF_GAIN_DATA = 50;
+    const unsigned short SIZE_OF_GAIN_DATA = 4 * sizeof(float);
+    const unsigned short BYTE_OFFSET_OF_BBOX_DATA =
+                                BYTE_OFFSET_OF_GAIN_DATA + SIZE_OF_GAIN_DATA;
     const unsigned short BYTES_PER_COORD = sizeof(bbox_coord[0]);
-    int max_data_bytes = byte_count - BYTE_OFFSET_OF_BBOX_DATA;
-    if (max_data_bytes < 0) return -1;
-    unsigned short max_coords = max_data_bytes / BYTES_PER_COORD;
+    int max_bbox_data_bytes = byte_count - BYTE_OFFSET_OF_BBOX_DATA;
+    if (max_bbox_data_bytes < 0) return -1;
+    unsigned short max_coords = max_bbox_data_bytes / BYTES_PER_COORD;
     if (bbox_coord_count > max_coords) bbox_coord_count = max_coords;
     // Bbox_coord_count should be a multiple of 4.
     bbox_coord_count -= bbox_coord_count % 4;
@@ -112,35 +135,35 @@ int overwrite_tif_tags(unsigned int width,
     byte[8] = 0x00;
     byte[9] = 0x03;
 
-    // IFD 0: Columns in image
+    // IFD 0: Exposure
 
-    byte[10] = 0x01;  // tag (2 bytes)
-    byte[11] = 0x00;
+    byte[10] = 0x96;  // tag (2 bytes)
+    byte[11] = 0x97;
     byte[12] = 0x00;  // type = unsigned ints (2 bytes)
     byte[13] = 0x04;
     byte[14] = 0x00;  // count of unsigned ints in data (4 bytes)
     byte[15] = 0x00;
     byte[16] = 0x00;
     byte[17] = 0x01;
-    byte[18] = (vwidth & 0xff000000) >> 24;  // column count (4 bytes)
-    byte[19] = (vwidth & 0x00ff0000) >> 16;
-    byte[20] = (vwidth & 0x0000ff00) >> 8;
-    byte[21] = (vwidth & 0x000000ff);
+    byte[18] = (exposure & 0xff000000) >> 24;  // column count (4 bytes)
+    byte[19] = (exposure & 0x00ff0000) >> 16;
+    byte[20] = (exposure & 0x0000ff00) >> 8;
+    byte[21] = (exposure & 0x000000ff);
 
     // IFD 1: Rows in image
 
-    byte[22] = 0x01;  // tag (2 bytes)
-    byte[23] = 0x01;
-    byte[24] = 0x00;  // type = unsigned ints (2 bytes)
-    byte[25] = 0x04;
-    byte[26] = 0x00;  // count of unsigned ints in data (4 bytes)
+    byte[22] = 0x96;  // tag (2 bytes)
+    byte[23] = 0x98;
+    byte[24] = 0x00;  // type = single float (2 bytes)
+    byte[25] = 0x0b;
+    byte[26] = 0x00;  // count of floats in data (4 bytes)
     byte[27] = 0x00;
     byte[28] = 0x00;
-    byte[29] = 0x01;
-    byte[30] = (vheight & 0xff000000) >> 24;  // row count (4 bytes)
-    byte[31] = (vheight & 0x00ff0000) >> 16;
-    byte[32] = (vheight & 0x0000ff00) >> 8;
-    byte[33] = (vheight & 0x000000ff);
+    byte[29] = 0x04;
+    byte[30] = 0x00;
+    byte[31] = 0x00;
+    byte[32] = 0x00;
+    byte[33] = BYTE_OFFSET_OF_GAIN_DATA;
 
     // IFD 2: BBox data
 
@@ -163,6 +186,13 @@ int overwrite_tif_tags(unsigned int width,
     byte[47] = 0x00;
     byte[48] = 0x00;
     byte[49] = 0x00;
+
+    // Gains
+
+    copy_float_to_nbo(analog_gain, &byte[BYTE_OFFSET_OF_GAIN_DATA]);
+    copy_float_to_nbo(digital_gain, &byte[BYTE_OFFSET_OF_GAIN_DATA + 4]);
+    copy_float_to_nbo(awb_red_gain, &byte[BYTE_OFFSET_OF_GAIN_DATA + 8]);
+    copy_float_to_nbo(awb_blue_gain, &byte[BYTE_OFFSET_OF_GAIN_DATA + 12]);
 
     // Bbox coords
 

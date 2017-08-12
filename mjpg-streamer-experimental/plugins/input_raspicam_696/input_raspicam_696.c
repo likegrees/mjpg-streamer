@@ -146,6 +146,7 @@ static int wantPreview = 0;
 static int wantTimestamp = 0;
 static RASPICAM_CAMERA_PARAMETERS c_params;
 static Splitter_Callback_Data splitter_callback_data;
+MMAL_PARAMETER_CAMERA_SETTINGS_T settings;
 
 static struct timeval timestamp;
 
@@ -548,7 +549,7 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
                     copy_best_bounding_boxes(&pData->blob_list, MAX_BBOXES * 4,
                                              pData->bbox_element);
             pthread_mutex_unlock(&pData->bbox_mutex);
-            printf("bbox_element_count= %d\n", pData->bbox_element_count);
+            //printf("bbox_element_count= %d\n", pData->bbox_element_count);
         }
         mmal_buffer_header_mem_unlock(buffer);
         if (pData->yuv_fp != NULL) {
@@ -610,19 +611,23 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
           buffer->data[2] == 0xff &&
           buffer->data[3] == 0xe1) {
 
-          /* Send the bounding boxes in the image packets by overwriting the
-             tiff tags in the header supplied by Broadcom. */
+          /* Send the bounding boxes and gains in the image packets by
+             overwriting the TIFF tags in the header supplied by Broadcom. */
 
           const unsigned int SIZE_FIELD_OFFSET = 4;
           unsigned int total_header_bytes = SIZE_FIELD_OFFSET +
                       (((unsigned int)buffer->data[4] << 8) | buffer->data[5]);
           const unsigned int TIFF_TAGS_OFFSET = 12;
           pthread_mutex_lock(&pData->splitter_data_ptr->bbox_mutex);
-          overwrite_tif_tags(pData->width, pData->height, pData->vwidth,
-                             pData->vheight,
-                             pData->splitter_data_ptr->bbox_element_count,
-                             pData->splitter_data_ptr->bbox_element,
-                             buffer->data);
+          overwrite_tif_tags(
+                pData->width, pData->height, pData->vwidth, pData->vheight,
+                pData->splitter_data_ptr->bbox_element_count,
+                pData->splitter_data_ptr->bbox_element, settings.exposure,
+                settings.analog_gain.num / (float)settings.analog_gain.den,
+                settings.digital_gain.num / (float)settings.digital_gain.den,
+                settings.awb_red_gain.num / (float)settings.awb_red_gain.den,
+                settings.awb_blue_gain.num / (float)settings.awb_blue_gain.den,
+                buffer->data);
           pthread_mutex_unlock(&pData->splitter_data_ptr->bbox_mutex);
       }
 #endif
@@ -727,17 +732,19 @@ static void camera_control_callback(MMAL_PORT_T *port,
             (MMAL_EVENT_PARAMETER_CHANGED_T *)buffer->data;
         switch (param->hdr.id) {
             case MMAL_PARAMETER_CAMERA_SETTINGS: {
-                 MMAL_PARAMETER_CAMERA_SETTINGS_T *settings =
-                     (MMAL_PARAMETER_CAMERA_SETTINGS_T*)param;
+                 MMAL_PARAMETER_CAMERA_SETTINGS_T* sptr = &settings;
+                 *sptr = *(MMAL_PARAMETER_CAMERA_SETTINGS_T*)param;
+                /*
                 printf(
                  "Exposure now %u, analog gain %u/%u, digital gain %u/%u ",
-                       settings->exposure,
-                       settings->analog_gain.num, settings->analog_gain.den,
-                       settings->digital_gain.num, settings->digital_gain.den);
+                       settings.exposure,
+                       settings.analog_gain.num, settings.analog_gain.den,
+                       settings.digital_gain.num, settings.digital_gain.den);
                 printf("AWB R=%u/%u, B=%u/%u\n",
-                       settings->awb_red_gain.num, settings->awb_red_gain.den,
-                       settings->awb_blue_gain.num,
-                       settings->awb_blue_gain.den);
+                       settings.awb_red_gain.num, settings.awb_red_gain.den,
+                       settings.awb_blue_gain.num,
+                       settings.awb_blue_gain.den);
+                */
                 break;
             }
             /*
