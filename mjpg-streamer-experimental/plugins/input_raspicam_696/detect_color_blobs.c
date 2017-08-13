@@ -782,9 +782,6 @@ unsigned int copy_best_bounding_boxes(Blob_List* p,
                                       unsigned short bbox_element[]) {
     int i;
     int k = 0;
-    for (i = 0; i < p->used_root_list_count; ++i) {
-        Blob_Stats* s = &p->root_info[i].stats;
-    }
     sort_blobs_by_pixel_count(p);
     for (i = 0; i < p->used_root_list_count; ++i) {
         Blob_Stats* s = &p->root_info[i].stats;
@@ -797,6 +794,19 @@ unsigned int copy_best_bounding_boxes(Blob_List* p,
         if (k >= bbox_element_count / 4) break;
     }
     return k * 4;
+}
+
+
+unsigned int copy_best_bboxes_to_blob_stats_array(Blob_List* p,
+                                                  int stats_count,
+                                                  Blob_Stats stats[]) {
+    int i;
+    //sort_blobs_by_pixel_count(p);
+    for (i = 0; i < p->used_root_list_count; ++i) {
+        stats[i] = p->root_info[i].stats;
+        if (i >= stats_count) break;
+    }
+    return i;
 }
 
 

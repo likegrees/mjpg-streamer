@@ -53,6 +53,7 @@
 #include "overwrite_tif_tags.h"
 #include "detect_color_blobs.h"
 #include "yuv_color_space_image.h"
+#include "udp_comms.h"
 
 #include "RaspiCamControl.c"
 
@@ -146,7 +147,8 @@ static int wantPreview = 0;
 static int wantTimestamp = 0;
 static RASPICAM_CAMERA_PARAMETERS c_params;
 static Splitter_Callback_Data splitter_callback_data;
-MMAL_PARAMETER_CAMERA_SETTINGS_T settings;
+static MMAL_PARAMETER_CAMERA_SETTINGS_T settings;
+static Udp_Comms udp_comms;
 
 static struct timeval timestamp;
 
@@ -536,6 +538,8 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
             img = splitter_callback_data.test_img;
         }
         if (pData->detect_yuv) {
+            int64_t now = get_cam_host_usec(&udp_comms);
+            Udp_Blob_List udp_blob_list;
             detect_color_blobs(&pData->blob_list, pData->blob_yuv_min[0],
                     pData->blob_yuv_min[1], pData->blob_yuv_max[1],
                     pData->blob_yuv_min[2], pData->blob_yuv_max[2],
@@ -550,6 +554,17 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
                                              pData->bbox_element);
             pthread_mutex_unlock(&pData->bbox_mutex);
             //printf("bbox_element_count= %d\n", pData->bbox_element_count);
+            udp_blob_list.msg_id = ID_UDP_BLOB_LIST;
+            udp_blob_list.filler[0] = 0;
+            udp_blob_list.filler[1] = 0;
+            udp_blob_list.filler[2] = 0;
+            udp_blob_list.blob_count = copy_best_bboxes_to_blob_stats_array(
+                                                        &pData->blob_list,
+                                                        MAX_UDP_BLOBS,
+                                                        &udp_blob_list.blob[0]);
+            if (udp_comms_send_blobs_to_all(&udp_comms, now, &udp_blob_list) < 0) {
+                printf("can't udp_comm_send_blobs_to_all\n");
+            }
         }
         mmal_buffer_header_mem_unlock(buffer);
         if (pData->yuv_fp != NULL) {
@@ -1164,6 +1179,16 @@ void *worker_thread(void *arg)
     fprintf(stderr, "Unable to set cancel state\n");
     exit(EXIT_FAILURE);
   }
+
+//#define DEFAULT_UDP_COMMS_CLIENT_NAME "127.0.0.1"
+#define DEFAULT_UDP_COMMS_CLIENT_NAME NULL
+#define DEFAULT_UDP_COMMS_CLIENT_PORT 10696
+#define USECS_PER_SECOND 1000000
+#define MAX_ROUND_TRIP_USECS (USECS_PER_SECOND / 8)
+#define CLOCK_SAMPLES 500
+  udp_comms_construct(&udp_comms, DEFAULT_UDP_COMMS_CLIENT_NAME, 
+                      DEFAULT_UDP_COMMS_CLIENT_PORT, CLOCK_SAMPLES,
+                      MAX_ROUND_TRIP_USECS, false);
 
   IPRINT("Starting Camera\n");
 

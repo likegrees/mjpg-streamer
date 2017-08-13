@@ -102,8 +102,6 @@ typedef struct {
  * See the discussion of the blob_set field of a Blob_List.
  */
 typedef struct {
-    /** If this is a root, stats contains a description of the entire blob. */
-    //Blob_Stats stats;
     Blob_Set_Index parent_index;     /// index into blob_set array
     Root_List_Index root_list_index; /// index into root_info array
     /** Approximates the log of the number of items rooted at this node. */
@@ -289,6 +287,10 @@ unsigned int blob_list_purge_small_bboxes(Blob_List* p,
 unsigned int copy_best_bounding_boxes(Blob_List* p,
                                       int bbox_element_count,
                                       unsigned short bbox_element[]);
+
+unsigned int copy_best_bboxes_to_blob_stats_array(Blob_List* p,
+                                                  int stats_count,
+                                                  Blob_Stats stats[]);
 
 /**
  * @brief Draw bounding boxes around detected blobs in the given image.
