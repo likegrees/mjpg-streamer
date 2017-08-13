@@ -97,6 +97,7 @@ typedef struct {
     unsigned char* test_img;
     unsigned char blob_yuv_min[3];
     unsigned char blob_yuv_max[3];
+    unsigned char yuv_meas[3];
     unsigned int frame_no;
     MMAL_POOL_T* pool_ptr;
     FILE* yuv_fp;
@@ -538,13 +539,16 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
             img = splitter_callback_data.test_img;
         }
         if (pData->detect_yuv) {
+            unsigned int cols = port->format->es->video.width;
+            unsigned int rows = port->format->es->video.height;
             int64_t now = get_cam_host_usec(&udp_comms);
             Udp_Blob_List udp_blob_list;
+            yuv420_get_pixel(cols, rows, img, cols / 2, rows / 2,
+                             pData->yuv_meas);
             detect_color_blobs(&pData->blob_list, pData->blob_yuv_min[0],
                     pData->blob_yuv_min[1], pData->blob_yuv_max[1],
                     pData->blob_yuv_min[2], pData->blob_yuv_max[2],
-                    false, port->format->es->video.width,
-                    port->format->es->video.height, img);
+                    false, cols, rows, img);
 #define MIN_PIXELS_PER_BLOB 30
             (void)blob_list_purge_small_bboxes(&pData->blob_list,
                                                MIN_PIXELS_PER_BLOB);
@@ -562,7 +566,8 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
                                                         &pData->blob_list,
                                                         MAX_UDP_BLOBS,
                                                         &udp_blob_list.blob[0]);
-            if (udp_comms_send_blobs_to_all(&udp_comms, now, &udp_blob_list) < 0) {
+            if (udp_comms_send_blobs_to_all(&udp_comms,
+                                            now, &udp_blob_list) < 0) {
                 printf("can't udp_comm_send_blobs_to_all\n");
             }
         }
@@ -642,7 +647,7 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
                 settings.digital_gain.num / (float)settings.digital_gain.den,
                 settings.awb_red_gain.num / (float)settings.awb_red_gain.den,
                 settings.awb_blue_gain.num / (float)settings.awb_blue_gain.den,
-                buffer->data);
+                pData->splitter_data_ptr->yuv_meas, buffer->data);
           pthread_mutex_unlock(&pData->splitter_data_ptr->bbox_mutex);
       }
 #endif

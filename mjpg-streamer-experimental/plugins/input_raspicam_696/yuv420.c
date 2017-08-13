@@ -241,3 +241,24 @@ void convert_yuv420_to_rgb(unsigned int cols,
         }
     }
 }
+
+void yuv420_get_pixel(unsigned int cols,
+                      unsigned int rows,
+                      const unsigned char yuv[],
+                      unsigned int x,
+                      unsigned int y,
+                      unsigned char return_yuv_pixel[3]) {
+    if (x >= cols || y >= rows) {
+        return_yuv_pixel[0] = 0;
+        return_yuv_pixel[1] = 0;
+        return_yuv_pixel[2] = 0;
+    } else {
+        unsigned int pixels = cols * rows;
+        unsigned int uv_offset = (y / 2) * (cols / 2) + (x / 2);
+        unsigned char u = yuv[pixels + uv_offset];
+        unsigned char v = yuv[pixels + uv_offset + (pixels / 4)];
+        return_yuv_pixel[0] = yuv[y * cols + x];
+        return_yuv_pixel[1] = u;
+        return_yuv_pixel[2] = v;
+    }
+}

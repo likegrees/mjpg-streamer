@@ -68,12 +68,13 @@ int overwrite_tif_tags(unsigned int width,
                        unsigned int vwidth,
                        unsigned int vheight,
                        unsigned short bbox_coord_count, 
-                       unsigned short bbox_coord[],
+                       const unsigned short bbox_coord[],
                        unsigned int exposure,
                        float analog_gain,
                        float digital_gain,
                        float awb_red_gain,
                        float awb_blue_gain,
+                       const unsigned char yuv[3],
                        unsigned char* buf) {
 
     /* Check the 1st four bytes to make sure this is a JPEG header. */
@@ -101,7 +102,7 @@ int overwrite_tif_tags(unsigned int width,
 
     unsigned short byte_count = total_header_bytes - TIFF_TAGS_OFFSET;
 
-    const unsigned short BYTE_OFFSET_OF_GAIN_DATA = 50;
+    const unsigned short BYTE_OFFSET_OF_GAIN_DATA = 62;
     const unsigned short SIZE_OF_GAIN_DATA = 4 * sizeof(float);
     const unsigned short BYTE_OFFSET_OF_BBOX_DATA =
                                 BYTE_OFFSET_OF_GAIN_DATA + SIZE_OF_GAIN_DATA;
@@ -133,7 +134,7 @@ int overwrite_tif_tags(unsigned int width,
     // Count of IFDs
 
     byte[8] = 0x00;
-    byte[9] = 0x03;
+    byte[9] = 0x04;
 
     // IFD 0: Exposure
 
@@ -150,42 +151,57 @@ int overwrite_tif_tags(unsigned int width,
     byte[20] = (exposure & 0x0000ff00) >> 8;
     byte[21] = (exposure & 0x000000ff);
 
-    // IFD 1: Rows in image
+    // IFD 1: YUV
 
     byte[22] = 0x96;  // tag (2 bytes)
-    byte[23] = 0x98;
-    byte[24] = 0x00;  // type = single float (2 bytes)
-    byte[25] = 0x0b;
-    byte[26] = 0x00;  // count of floats in data (4 bytes)
+    byte[23] = 0x99;
+    byte[24] = 0x00;  // type = unsigned char (2 bytes)
+    byte[25] = 0x01;
+    byte[26] = 0x00;  // count of unsigned shorts in data (4 bytes)
     byte[27] = 0x00;
     byte[28] = 0x00;
-    byte[29] = 0x04;
-    byte[30] = 0x00;
-    byte[31] = 0x00;
-    byte[32] = 0x00;
-    byte[33] = BYTE_OFFSET_OF_GAIN_DATA;
+    byte[29] = 0x03;
+    byte[30] = yuv[0];
+    byte[31] = yuv[1];
+    byte[32] = yuv[2];
+    byte[33] = 0x00;  // unused
 
-    // IFD 2: BBox data
+    // IFD 2: Gains
 
     byte[34] = 0x96;  // tag (2 bytes)
-    byte[35] = 0x96;
-    byte[36] = 0x00;  // type = unsigned short (2 bytes)
-    byte[37] = 0x03;
-    byte[38] = 0x00;  // count of unsigned shorts in data (4 bytes)
+    byte[35] = 0x98;
+    byte[36] = 0x00;  // type = single float (2 bytes)
+    byte[37] = 0x0b;
+    byte[38] = 0x00;  // count of floats in data (4 bytes)
     byte[39] = 0x00;
-    byte[40] = (bbox_coord_count & 0xff00) >> 8;
-    byte[41] = (bbox_coord_count & 0x00ff);
-    byte[42] = 0x00;  // offset of start of bbox data (4 bytes)
+    byte[40] = 0x00;
+    byte[41] = 0x04;
+    byte[42] = 0x00;
     byte[43] = 0x00;
     byte[44] = 0x00;
-    byte[45] = BYTE_OFFSET_OF_BBOX_DATA;
+    byte[45] = BYTE_OFFSET_OF_GAIN_DATA;
+
+    // IFD 3: BBox data
+
+    byte[46] = 0x96;  // tag (2 bytes)
+    byte[47] = 0x96;
+    byte[48] = 0x00;  // type = unsigned short (2 bytes)
+    byte[49] = 0x03;
+    byte[50] = 0x00;  // count of unsigned shorts in data (4 bytes)
+    byte[51] = 0x00;
+    byte[52] = (bbox_coord_count & 0xff00) >> 8;
+    byte[53] = (bbox_coord_count & 0x00ff);
+    byte[54] = 0x00;  // offset of start of bbox data (4 bytes)
+    byte[55] = 0x00;
+    byte[56] = 0x00;
+    byte[57] = BYTE_OFFSET_OF_BBOX_DATA;
 
     // End of IFDs marker
 
-    byte[46] = 0x00;
-    byte[47] = 0x00;
-    byte[48] = 0x00;
-    byte[49] = 0x00;
+    byte[58] = 0x00;
+    byte[59] = 0x00;
+    byte[60] = 0x00;
+    byte[61] = 0x00;
 
     // Gains
 

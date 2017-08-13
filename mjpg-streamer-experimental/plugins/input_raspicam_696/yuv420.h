@@ -163,13 +163,52 @@ int yuv420_write(const char* filename,
                  unsigned int height,
                  unsigned char* img);
 
+/**
+ * Convert an RGB image to  YUV420 RGB format.
+ *
+ * @param width [in]             The number of columns in the RGB image.
+ * @param height [in]            The number of rows in the RGB image.
+ * @param rgb [out]              The RGB image.  This should point to
+ *                               width * height bytes.
+ * @param yuv_bytes [in]         The number of bytes in the yuv array.  This
+ *                               must be at least width * height * 3 / 2.
+ * @param yuv [in]               Memory to store the returned YUV420 image.
+ */
 int convert_rgb_to_yuv420(unsigned int width,
                           unsigned int height,
                           const unsigned char rgb[],
                           size_t yuv_bytes,
                           unsigned char yuv[]);
 
-void convert_yuv420_to_rgb(unsigned int cols,
-                           unsigned int rows,
+/**
+ * Convert a YUV420 image to RGB format.
+ *
+ * @param width [in]             The number of columns in the YUV420 image.
+ * @param height [in]            The number of rows in the YUV420 image.
+ * @param yuv [in]               The YUV420 image.  This should point to
+ *                               width * height * 3 / 2 bytes of memory.
+ * @param rgb [out]              Memory to store the returned RGB image.
+ *                               This should point to width * height bytes.
+ */
+void convert_yuv420_to_rgb(unsigned int width,
+                           unsigned int height,
                            const unsigned char yuv[],
                            unsigned char rgb[]);
+
+/**
+ * Return the pixel value at (x ,y) coord within the given YUV420 image.
+ *
+ * @param width [in]             The number of columns in the YUV420 image.
+ * @param height [in]            The number of rows in the YUV420 image.
+ * @param yuv [in]               The YUV420 image.  This should point to
+ *                               width * height * 3 / 2 bytes of memory.
+ * @param x [in]                 X-coordinate of pixel of interest.
+ * @param y [in]                 Y-coordinate of pixel of interest.
+ * @param return_yuv_pixel [out] Returns the YUV pixel value at (x, y)
+ */
+void yuv420_get_pixel(unsigned int width,
+                      unsigned int height,
+                      const unsigned char yuv[],
+                      unsigned int x,
+                      unsigned int y,
+                      unsigned char return_yuv_pixel[3]);
