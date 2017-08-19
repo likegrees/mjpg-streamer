@@ -58,42 +58,8 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include "tcp_comms.h"
+#include "get_ip_addr_str.h"
 
-static const char* get_ip_addr_str(const struct sockaddr* saddr,
-                                   char* buf,
-                                   size_t buf_bytes) {
-    int family = 0;
-    void* addr_ptr = NULL;
-    unsigned short port = 0;
-    switch (saddr->sa_family) {
-    case AF_INET:
-        family = AF_INET;
-        addr_ptr = &((struct sockaddr_in*)saddr)->sin_addr;
-        port = ntohs(((struct sockaddr_in*)saddr)->sin_port);
-        break;
-    case AF_INET6:
-        family = AF_INET6;
-        addr_ptr = &((struct sockaddr_in6*)saddr)->sin6_addr;
-        port = ntohs(((struct sockaddr_in6*)saddr)->sin6_port);
-        break;
-    }
-
-    if (addr_ptr == NULL) {
-        strncpy(buf, "<bad family>", buf_bytes);
-    } else {
-        if (inet_ntop(family, addr_ptr, buf, buf_bytes) == NULL) {
-            snprintf(buf, buf_bytes, "<errno %d>", errno);
-            buf[buf_bytes-1] = '\0';
-        } else {
-#define MAX_PORT_STR 20
-            char port_str[MAX_PORT_STR];
-            snprintf(port_str, MAX_PORT_STR, "/%u", port);
-            port_str[MAX_PORT_STR-1] = '\0';
-            strncat(buf, port_str, buf_bytes);
-        }
-    }
-    return buf;
-}
 
 static inline int_limit(int low, int high, int value) {
     return (value < low) ? low : (value > high) ? high : value;
@@ -122,6 +88,7 @@ static void* connection_thread(void* void_args_ptr) {
     bool error_seen = false;
 
     while ((bytes = recv(p->fd, &mesg, sizeof(mesg), 0)) > 0) {
+        float timestamp = get_usecs() / (float)USECS_PER_SECOND;
         pthread_mutex_lock(&p->lock_mutex);
         switch (mesg[0]) {
         case RASPICAM_SATURATION:
@@ -344,23 +311,22 @@ static void* connection_thread(void* void_args_ptr) {
             }
             break;
         default:
-            print_log("%s+%d: unexpected message %d from %s\n",
-                      __FILE__, __LINE__, mesg[0],
+            LOG_ERROR("at %.3f, unexpected message %d from %s\n",
+                      timestamp, mesg[0],
                       get_ip_addr_str(p->saddr, client_string,
                                       MAX_CLIENT_STRING));
         }
         pthread_mutex_unlock(&p->lock_mutex);
         if (error_seen) {
-            print_log("%s+%d: too few bytes (%d) in message %d from %s\n",
-                      __FILE__, __LINE__, bytes, mesg[0],
+            LOG_ERROR("at %.3f, too few bytes (%d) in message %d from %s\n",
+                      timestamp, bytes, mesg[0],
                       get_ip_addr_str(p->saddr, client_string,
                                       MAX_CLIENT_STRING));
         }
     }
-    print_log("%s+%d: can't recv from %s; errno=%d\n",
-              __FILE__, __LINE__,
-              get_ip_addr_str(p->saddr, client_string,
-                              MAX_CLIENT_STRING),
+    LOG_ERROR("at %.3f, can't recv from %s; errno= %d\n",
+              get_usecs() / (float)USECS_PER_SECOND,
+              get_ip_addr_str(p->saddr, client_string, MAX_CLIENT_STRING),
               errno);
     return NULL;
 }
@@ -395,8 +361,8 @@ static void* server_thread(void* void_args_ptr) {
         status = pthread_create(&unused_ptr->pthread_id, NULL,
                                 connection_thread, unused_ptr);
         if (status != 0) {
-            print_log("%s+%d: can't pthread_create (%d)\n",
-                      __FILE__, __LINE__, status);
+            LOG_ERROR("at %.3f, can't pthread_create (%d)\n",
+                      get_uscs / (float)USECS_PER_SECOND, status);
             return NULL;
         }
 
@@ -407,8 +373,8 @@ static void* server_thread(void* void_args_ptr) {
         unused_ptr = comms_ptr->client[comms_ptr->client_count];
         pthread_mutex_unlock(&comms_ptr->lock_mutex);
     }
-    print_log("%s+%d: can't accept; errno=%d\n",
-              __FILE__, __LINE__, errno);
+    LOG_ERROR("at %.3f, can't accept; errno=%d\n",
+              get_uscs / (float)USECS_PER_SECOND, errno);
     return NULL;
 }
 
@@ -431,8 +397,7 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
                         unsigned short port_number) {
     int comms_ptr->server.fd = socket(AF_INET, SOCK_STREAM, 0);
     if (comms_ptr->server.fd < 0) {
-        print_log("%s+%d: can't create socket; errno=%d\n",
-                  __FILE__, __LINE__, errno);
+        LOG_ERROR("can't create socket; errno=%d\n", errno);
         return -1;
     }
 
@@ -444,14 +409,12 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
 
     if (bind(comms_ptr->server.fd,
              (struct sockaddr*)saddr_ptr, comms_ptr->saddr_len) < 0) {
-        print_log("%s+%d: can't bind; errno=%d\n",
-                  __FILE__, __LINE__, errno);
+        LOG_ERROR("can't bind; errno=%d\n", errno);
         return -1;
     }
 
     if (listen(comms_ptr->server.fd, 3) < 0) {
-        print_log("%s+%d: can't listen; errno=%d\n",
-                  __FILE__, __LINE__, errno);
+        LOG_ERROR("can't listen; errno=%d\n", errno);
         return -1;
     }
 
@@ -464,8 +427,7 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
     raspicamcontrol_set_defaults(&comms_ptr->cam_params);
     int status = pthread_mutex_init(&comms_ptr->lock_mutex, NULL);
     if (status != 0) {
-        print_log("%s+%d: can't pthread_mutex_init (%d)\n",
-                  __FILE__, __LINE__, status);
+        LOG_ERROR("can't pthread_mutex_init (%d)\n", status);
         return -1;
     }
 
@@ -474,8 +436,7 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
     status = pthread_create(&comms_ptr->server_pthread_id, NULL,
                             server_thread, comms_ptr);
     if (status != 0) {
-        print_log("%s+%d: can't pthread_create (%d)\n",
-                  __FILE__, __LINE__, status);
+        LOG_ERROR("can't pthread_create (%d)\n", status);
         return -1;
     }
     return 0;

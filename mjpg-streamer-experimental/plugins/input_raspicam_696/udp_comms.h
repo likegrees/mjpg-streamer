@@ -95,6 +95,8 @@ typedef struct {
     int64_t min_offset_usec;
     int64_t mean_half_round_trip_usec;  /// mean message one way trip time
     int sample_count;                   /// number of time samples collected
+    int failed_sends;                   /// number of send failures
+    int log_next_at;
 } Client_Info;
 
 /**

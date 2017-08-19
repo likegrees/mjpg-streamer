@@ -19,13 +19,11 @@
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA    #
 #                                                                              #
  *******************************************************************************/
-#include <unistd.h>  /* for sleep */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <errno.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -34,17 +32,11 @@
 #include <sys/stat.h>
 #include <getopt.h>
 #include <pthread.h>
-#include <syslog.h>
 #include <time.h>
-
-#include <linux/types.h>          /* for videodev2.h */
-#include <linux/videodev2.h>
+#include <limits.h>
 
 #include "../../mjpg_streamer.h"
 #include "../../utils.h"
-
-#include "bcm_host.h"
-#include "interface/vcos/vcos.h"
 
 #include "mmal/mmal.h"
 #include "mmal/util/mmal_default_components.h"
@@ -54,6 +46,7 @@
 #include "detect_color_blobs.h"
 #include "yuv_color_space_image.h"
 #include "udp_comms.h"
+#include "log_error.h"
 
 #include "RaspiCamControl.c"
 
@@ -77,12 +70,6 @@
 // Frames rates of 0 implies variable, but denominator needs to be 1 to prevent div by 0
 #define PREVIEW_FRAME_RATE_NUM 0
 #define PREVIEW_FRAME_RATE_DEN 1
-
-#define LOG_ERROR(...) \
-    { char _bf[1024] = {0}; \
-      snprintf(_bf, sizeof(_bf)-1, __VA_ARGS__); \
-      fprintf(stderr, "%s", _bf); \
-      syslog(LOG_INFO, "%s+%d: %s", __FILE__, __LINE__, _bf); }
 
 typedef struct {
     MMAL_COMPONENT_T* component_ptr;
@@ -155,17 +142,18 @@ static struct timeval timestamp;
 
 /** Struct used to pass information in encoder port userdata to callback
  */
-typedef struct
-{
-  VCOS_SEMAPHORE_T complete_semaphore; /// semaphore which is posted when we reach end of frame (indicates end of capture or fault)
-  MMAL_POOL_T *pool; /// pointer to our state in case required in callback
-  Splitter_Callback_Data* splitter_data_ptr;
-  uint32_t offset;
-  unsigned int frame_no;
-  unsigned int width;
-  unsigned int height;
-  unsigned int vwidth;
-  unsigned int vheight;
+typedef struct {
+    /** semaphore which is posted when we reach end of frame
+        (indicates end of capture or fault) */
+    VCOS_SEMAPHORE_T complete_semaphore;
+    MMAL_POOL_T *pool; /// pointer to our state in case required in callback
+    Splitter_Callback_Data* splitter_data_ptr;
+    uint32_t offset;
+    unsigned int frame_no;
+    unsigned int width;
+    unsigned int height;
+    unsigned int vwidth;
+    unsigned int vheight;
 } PORT_USERDATA;
 
 
@@ -176,302 +164,341 @@ FILE* debug_fp = NULL;
 
 /*** plugin interface functions ***/
 
+/**
+ * Log contents of camera parameter structure.
+ *
+ * @param fps      Requested frames per second.
+ * @param width    Camera image width (pixels).
+ * @param height   Camera image height (pixels).
+ * @param vwidth   Video output width (pixels).
+ * @param vheight  Video output height (pixels).
+ * @param params   Camera parameters.
+ */
+void raspicamcontrol_log_parameters(int fps,
+                                    int width,
+                                    int height,
+                                    int vwidth,
+                                    int vheight,
+                                    const RASPICAM_CAMERA_PARAMETERS *params)
+{
+    const char *exp_mode = unmap_xref(params->exposureMode, exposure_map,
+                                      exposure_map_size);
+    const char *awb_mode = unmap_xref(params->awbMode, awb_map, awb_map_size);
+    const char *image_effect = unmap_xref(params->imageEffect, imagefx_map,
+                                          imagefx_map_size);
+    const char *metering_mode = unmap_xref(params->exposureMeterMode,
+                                           metering_mode_map,
+                                           metering_mode_map_size);
+
+    LOG_STATUS("FPS %d, Camera %d x %d, Video %d x %d\n",
+               fps, width, height, vwidth, vheight);
+    LOG_STATUS("Sharpness %d, Contrast %d, Brightness %d\n",
+               params->sharpness, params->contrast, params->brightness);
+    LOG_STATUS(
+    "Saturation %d, ISO %d, Video Stabilisation %s, Exposure compensation %d\n",
+               params->saturation, params->ISO,
+               params->videoStabilisation ? "Yes": "No",
+               params->exposureCompensation);
+    LOG_STATUS("Exposure Mode '%s', AWB Mode '%s', Image Effect '%s'\n",
+               exp_mode, awb_mode, image_effect);
+    LOG_STATUS(
+    "Metering Mode '%s', Colour Effect Enabled %s with U = %d, V = %d\n",
+               metering_mode, params->colourEffects.enable ? "Yes":"No",
+               params->colourEffects.u, params->colourEffects.v);
+    LOG_STATUS("Rotation %d, hflip %s, vflip %s\n",
+               params->rotation, params->hflip ? "Yes":"No",
+               params->vflip ? "Yes":"No");
+    LOG_STATUS("ROI x %lf, y %f, w %f h %f\n",
+               params->roi.x, params->roi.y, params->roi.w, params->roi.h);
+}
+
+
 /******************************************************************************
   Description.: parse input parameters
   Input Value.: param contains the command line string and a pointer to globals
   Return Value: 0 if everything is ok
  ******************************************************************************/
-int input_init(input_parameter *param, int plugin_no)
-{
+int input_init(input_parameter *param, int plugin_no) {
 #ifdef DSC
-  debug_fp = fopen("debug.txt", "w");
+    debug_fp = fopen("debug.txt", "w");
 #endif
-  int i;
-  if (pthread_mutex_init(&controls_mutex, NULL) != 0)
-  {
-    IPRINT("could not initialize mutex variable\n");
-    exit(EXIT_FAILURE);
-  }
-
-  init_splitter_callback_data(&splitter_callback_data);
-
-  param->argv[0] = INPUT_PLUGIN_NAME;
-  plugin_number = plugin_no;
-
-  //setup the camera control st
-  raspicamcontrol_set_defaults(&c_params);
-
-  /* show all parameters for DBG purposes */
-  for (i = 0; i < param->argc; i++)
-  {
-    DBG("argv[%d]=%s\n", i, param->argv[i]);
-  }
-
-  reset_getopt();
-  while(1) {
-    int option_index = 0, c = 0;
-    static struct option long_options[] = {
-      {"h", no_argument, 0, 0},                       // 0
-      {"help", no_argument, 0, 0},                    // 1
-      {"x", required_argument, 0, 0},                 // 2
-      {"width", required_argument, 0, 0},             // 3
-      {"y", required_argument, 0, 0},                 // 4
-      {"height", required_argument, 0, 0},            // 5
-      {"fps", required_argument, 0, 0},               // 6
-      {"framerate", required_argument, 0, 0},         // 7
-      {"sh", required_argument, 0, 0},                // 8
-      {"co", required_argument, 0, 0},                // 9
-      {"br", required_argument, 0, 0},                // 10
-      {"sa", required_argument, 0, 0},                // 11
-      {"ISO", required_argument, 0, 0},               // 12
-      {"vs", no_argument, 0, 0},                      // 13
-      {"ev", required_argument, 0, 0},                // 14
-      {"ex", required_argument, 0, 0},                // 15
-      {"awb", required_argument, 0, 0},               // 16
-      {"ifx", required_argument, 0, 0},               // 17
-      {"cfx", required_argument, 0, 0},               // 18
-      {"mm", required_argument, 0, 0},                // 19
-      {"rot", required_argument, 0, 0},               // 20
-      {"hf", no_argument, 0, 0},                      // 21
-      {"vf", no_argument, 0, 0},                      // 22
-      {"quality", required_argument, 0, 0},           // 23
-      {"usestills", no_argument, 0, 0},               // 24
-      {"preview", no_argument, 0, 0},                 // 25
-      {"timestamp", no_argument, 0, 0},               // 26
-      {"stats", no_argument, 0, 0},                   // 27
-      {"drc", required_argument, 0, 0},               // 28
-      {"shutter", required_argument, 0, 0},           // 29
-      {"awbgainR", required_argument, 0, 0},          // 30
-      {"awbgainB", required_argument, 0, 0},          // 31
-      {"blobyuv", required_argument, 0, 0},           // 32
-      {"writeyuv", no_argument, 0, 0},                // 33
-      {"writejpg", no_argument, 0, 0},                // 34
-      {"testimg", required_argument, 0, 0},           // 35
-      {"vwidth", required_argument, 0, 0},            // 36
-      {"vheight", required_argument, 0, 0},           // 37
-      {0, 0, 0, 0}
-    };
-
-    c = getopt_long_only(param->argc, param->argv, "", long_options, &option_index);
-
-    /* no more options to parse */
-    if(c == -1)
-      break;
-
-    /* unrecognized option */
-    if (c == '?')
-    {
-      help();
-      return 1;
+    int i;
+    if (pthread_mutex_init(&controls_mutex, NULL) != 0) {
+        LOG_ERROR("could not initialize mutex variable\n");
+        exit(EXIT_FAILURE);
     }
 
-    switch(option_index) {
-      /* h, help */
-      case 0:
-      case 1:
-        DBG("case 0,1\n");
-        help();
-        return 1;
-        break;
-        /* width */
-      case 2:
-      case 3:
-        DBG("case 2,3\n");
-        width = atoi(optarg);
-        width = VCOS_ALIGN_UP(width, 32); // DSC
-        break;
-        /* height */
-      case 4:
-      case 5:
-        DBG("case 4,5\n");
-        height = atoi(optarg);
-        height = VCOS_ALIGN_UP(height, 16); // DSC
-        break;
-        /* fps */
-      case 6:
-      case 7:
-        DBG("case 6, 7\n");
-        fps = atoi(optarg);
-        break;
-      case 8:
-        //sharpness
-        sscanf(optarg, "%d", &c_params.sharpness);
-        break;
-      case 9:
-        //contrast
-        sscanf(optarg, "%d", &c_params.contrast);
-        break;
-      case 10:
-        //brightness
-        sscanf(optarg, "%d", &c_params.brightness);
-        break;
-      case 11:
-        //saturation
-        sscanf(optarg, "%d", &c_params.saturation);
-        break;
-      case 12:
-        //ISO
-        sscanf(optarg, "%d", &c_params.ISO);
-        break;
-      case 13:
-        //video stabilisation
-        c_params.videoStabilisation = 1;
-        break;
-      case 14:
-        //ev
-        sscanf(optarg, "%d", &c_params.exposureCompensation);
-        break;
-      case 15:
-        //exposure
-        c_params.exposureMode = exposure_mode_from_string(optarg);
-        break;
-      case 16:
-        //awb mode
-        c_params.awbMode = awb_mode_from_string(optarg);
-        break;
-      case 17:
-        //img effect
-        c_params.imageEffect = imagefx_mode_from_string(optarg);
-        break;
-      case 18:
-        //color effects
-        sscanf(optarg, "%d:%d", &c_params.colourEffects.u, &c_params.colourEffects.u);
-        c_params.colourEffects.enable = 1;
-        break;
-      case 19:
-        //metering mode
-        c_params.exposureMeterMode = metering_mode_from_string(optarg);
-        break;
-      case 20:
-        //rotation
-        sscanf(optarg, "%d", &c_params.rotation);
-        break;
-      case 21:
-        //hflip
-        c_params.hflip  = 1;
-        break;
-      case 22:
-        //vflip
-        c_params.vflip = 1;
-        break;
-      case 23:
-        //quality
-        quality = atoi(optarg);
-        break;
-      case 24:
-        //use stills
-        usestills = 1;
-        break;
-      case 25:
-        //display preview
-        wantPreview = 1;
-        break;
-      case 26:
-        //timestamp
-        wantTimestamp = 1;
-        break;
-      case 27:
-        // use stats
-        c_params.stats_pass = MMAL_TRUE;
-        break;
-      case 28:
-        // Dynamic Range Compensation DRC
-        c_params.drc_level = drc_mode_from_string(optarg);
-        break;
-      case 29:
-        // shutter speed in microseconds
-        sscanf(optarg, "%d", &c_params.shutter_speed);
-        break;
-      case 30:
-        // awb gain red
-        sscanf(optarg, "%f", &c_params.awb_gains_r);
-        break;
-      case 31:
-        // awb gain blue
-        sscanf(optarg, "%f", &c_params.awb_gains_b);
-        break;
-      case 32:
-        // blobyuv
-        {
-          unsigned int opt0;
-          unsigned int opt1;
-          unsigned int opt2;
-          unsigned int opt3;
-          unsigned int opt4;
-          unsigned int opt5;
-          if (sscanf(optarg, "%u,%u,%u,%u,%u,%u",
-                     &opt0, &opt1, &opt2, &opt3, &opt4, &opt5) != 6) {
-            fprintf(stderr,
-                    "-blobyuv requires 6 unsigned int arguments\n");
+    init_splitter_callback_data(&splitter_callback_data);
+
+    param->argv[0] = INPUT_PLUGIN_NAME;
+    plugin_number = plugin_no;
+
+    //setup the camera control st
+    raspicamcontrol_set_defaults(&c_params);
+
+    /* show all parameters for DBG purposes */
+    for (i = 0; i < param->argc; i++) {
+        DBG("argv[%d]=%s\n", i, param->argv[i]);
+    }
+
+    reset_getopt();
+    while(1) {
+        int option_index = 0, c = 0;
+        static struct option long_options[] = {
+            {"h", no_argument, 0, 0},                       // 0
+            {"help", no_argument, 0, 0},                    // 1
+            {"x", required_argument, 0, 0},                 // 2
+            {"width", required_argument, 0, 0},             // 3
+            {"y", required_argument, 0, 0},                 // 4
+            {"height", required_argument, 0, 0},            // 5
+            {"fps", required_argument, 0, 0},               // 6
+            {"framerate", required_argument, 0, 0},         // 7
+            {"sh", required_argument, 0, 0},                // 8
+            {"co", required_argument, 0, 0},                // 9
+            {"br", required_argument, 0, 0},                // 10
+            {"sa", required_argument, 0, 0},                // 11
+            {"ISO", required_argument, 0, 0},               // 12
+            {"vs", no_argument, 0, 0},                      // 13
+            {"ev", required_argument, 0, 0},                // 14
+            {"ex", required_argument, 0, 0},                // 15
+            {"awb", required_argument, 0, 0},               // 16
+            {"ifx", required_argument, 0, 0},               // 17
+            {"cfx", required_argument, 0, 0},               // 18
+            {"mm", required_argument, 0, 0},                // 19
+            {"rot", required_argument, 0, 0},               // 20
+            {"hf", no_argument, 0, 0},                      // 21
+            {"vf", no_argument, 0, 0},                      // 22
+            {"quality", required_argument, 0, 0},           // 23
+            {"usestills", no_argument, 0, 0},               // 24
+            {"preview", no_argument, 0, 0},                 // 25
+            {"timestamp", no_argument, 0, 0},               // 26
+            {"stats", no_argument, 0, 0},                   // 27
+            {"drc", required_argument, 0, 0},               // 28
+            {"shutter", required_argument, 0, 0},           // 29
+            {"awbgainR", required_argument, 0, 0},          // 30
+            {"awbgainB", required_argument, 0, 0},          // 31
+            {"blobyuv", required_argument, 0, 0},           // 32
+            {"writeyuv", no_argument, 0, 0},                // 33
+            {"writejpg", no_argument, 0, 0},                // 34
+            {"testimg", required_argument, 0, 0},           // 35
+            {"vwidth", required_argument, 0, 0},            // 36
+            {"vheight", required_argument, 0, 0},           // 37
+            {0, 0, 0, 0}
+        };
+
+        c = getopt_long_only(param->argc, param->argv, "", long_options,
+                             &option_index);
+
+        /* no more options to parse */
+        if(c == -1) break;
+
+        /* unrecognized option */
+        if (c == '?') {
             help();
             return 1;
-          }
-          if (opt0 > 255) opt0 = 255;
-          if (opt1 > 255) opt1 = 255;
-          if (opt2 > 255) opt2 = 255;
-          if (opt3 > 255) opt3 = 255;
-          if (opt4 > 255) opt4 = 255;
-          if (opt5 > 255) opt5 = 255;
-          splitter_callback_data.blob_yuv_min[0] = opt0;
-          splitter_callback_data.blob_yuv_max[0] = opt1;
-          splitter_callback_data.blob_yuv_min[1] = opt2;
-          splitter_callback_data.blob_yuv_max[1] = opt3;
-          splitter_callback_data.blob_yuv_min[2] = opt4;
-          splitter_callback_data.blob_yuv_max[2] = opt5;
-          splitter_callback_data.detect_yuv = true;
+        }
+
+        switch(option_index) {
+        /* h, help */
+        case 0:
+        case 1:
+            help();
+            return 1;
+            break;
+            /* width */
+        case 2:
+        case 3:
+            width = atoi(optarg);
+            width = VCOS_ALIGN_UP(width, 32); // DSC
+            break;
+            /* height */
+        case 4:
+        case 5:
+            height = atoi(optarg);
+            height = VCOS_ALIGN_UP(height, 16); // DSC
+            break;
+            /* fps */
+        case 6:
+        case 7:
+            fps = atoi(optarg);
+            break;
+        case 8:
+            //sharpness
+            sscanf(optarg, "%d", &c_params.sharpness);
+            break;
+        case 9:
+            //contrast
+            sscanf(optarg, "%d", &c_params.contrast);
+            break;
+        case 10:
+            //brightness
+            sscanf(optarg, "%d", &c_params.brightness);
+            break;
+        case 11:
+            //saturation
+            sscanf(optarg, "%d", &c_params.saturation);
+            break;
+        case 12:
+            //ISO
+            sscanf(optarg, "%d", &c_params.ISO);
+            break;
+        case 13:
+            //video stabilisation
+            c_params.videoStabilisation = 1;
+            break;
+        case 14:
+            //ev
+            sscanf(optarg, "%d", &c_params.exposureCompensation);
+            break;
+        case 15:
+            //exposure
+            c_params.exposureMode = exposure_mode_from_string(optarg);
+            break;
+        case 16:
+            //awb mode
+            c_params.awbMode = awb_mode_from_string(optarg);
+            break;
+        case 17:
+            //img effect
+            c_params.imageEffect = imagefx_mode_from_string(optarg);
+            break;
+        case 18:
+            //color effects
+            sscanf(optarg, "%d:%d",
+                   &c_params.colourEffects.u,
+                   &c_params.colourEffects.u);
+            c_params.colourEffects.enable = 1;
+            break;
+        case 19:
+            //metering mode
+            c_params.exposureMeterMode = metering_mode_from_string(optarg);
+            break;
+        case 20:
+            //rotation
+            sscanf(optarg, "%d", &c_params.rotation);
+            break;
+        case 21:
+            //hflip
+            c_params.hflip  = 1;
+            break;
+        case 22:
+            //vflip
+            c_params.vflip = 1;
+            break;
+        case 23:
+            //quality
+            quality = atoi(optarg);
+            break;
+        case 24:
+            //use stills
+            usestills = 1;
+            break;
+        case 25:
+            //display preview
+            wantPreview = 1;
+            break;
+        case 26:
+            //timestamp
+            wantTimestamp = 1;
+            break;
+        case 27:
+            // use stats
+            c_params.stats_pass = MMAL_TRUE;
+            break;
+        case 28:
+            // Dynamic Range Compensation DRC
+            c_params.drc_level = drc_mode_from_string(optarg);
+            break;
+        case 29:
+            // shutter speed in microseconds
+            sscanf(optarg, "%d", &c_params.shutter_speed);
+            break;
+        case 30:
+            // awb gain red
+            sscanf(optarg, "%f", &c_params.awb_gains_r);
+            break;
+        case 31:
+            // awb gain blue
+            sscanf(optarg, "%f", &c_params.awb_gains_b);
+            break;
+        case 32:
+            // blobyuv
+            {
+                unsigned int opt0;
+                unsigned int opt1;
+                unsigned int opt2;
+                unsigned int opt3;
+                unsigned int opt4;
+                unsigned int opt5;
+                if (sscanf(optarg, "%u,%u,%u,%u,%u,%u",
+                            &opt0, &opt1, &opt2, &opt3, &opt4, &opt5) != 6) {
+                    LOG_ERROR("-blobyuv requires 6 unsigned int arguments\n");
+                    help();
+                    return 1;
+                }
+                if (opt0 > 255) opt0 = 255;
+                if (opt1 > 255) opt1 = 255;
+                if (opt2 > 255) opt2 = 255;
+                if (opt3 > 255) opt3 = 255;
+                if (opt4 > 255) opt4 = 255;
+                if (opt5 > 255) opt5 = 255;
+                splitter_callback_data.blob_yuv_min[0] = opt0;
+                splitter_callback_data.blob_yuv_max[0] = opt1;
+                splitter_callback_data.blob_yuv_min[1] = opt2;
+                splitter_callback_data.blob_yuv_max[1] = opt3;
+                splitter_callback_data.blob_yuv_min[2] = opt4;
+                splitter_callback_data.blob_yuv_max[2] = opt5;
+                splitter_callback_data.detect_yuv = true;
 #define MAX_RUNS 10000
 #define MAX_BLOBS 1000
-          splitter_callback_data.blob_list = blob_list_init(MAX_RUNS,
-                                                            MAX_BLOBS);
+                splitter_callback_data.blob_list = blob_list_init(MAX_RUNS,
+                                                                  MAX_BLOBS);
+            }
+            break;
+        case 33:
+            //writeyuv
+            splitter_callback_data.yuv_write = true;
+            break;
+        case 34:
+            //writejpg
+            splitter_callback_data.jpg_write = true;
+            break;
+        case 35:
+            sscanf(optarg, "%d", &splitter_callback_data.test_img_y_value);
+            if (splitter_callback_data.test_img_y_value > 255) {
+                splitter_callback_data.test_img_y_value = 255;
+            }
+            //testimg
+            break;
+            /* vwidth */
+        case 36:
+            vwidth = atoi(optarg);
+            vwidth = VCOS_ALIGN_UP(vwidth, 32); // DSC
+            break;
+            /* height */
+        case 37:
+            vheight = atoi(optarg);
+            vheight = VCOS_ALIGN_UP(vheight, 16); // DSC
+            break;
+        default:
+            DBG("default case\n");
+            help();
+            return 1;
         }
-        break;
-      case 33:
-        //writeyuv
-        splitter_callback_data.yuv_write = true;
-        break;
-      case 34:
-        //writejpg
-        splitter_callback_data.jpg_write = true;
-        break;
-      case 35:
-        sscanf(optarg, "%d", &splitter_callback_data.test_img_y_value);
-        if (splitter_callback_data.test_img_y_value > 255) {
-            splitter_callback_data.test_img_y_value = 255;
-        }
-        //testimg
-        break;
-        /* vwidth */
-      case 36:
-        vwidth = atoi(optarg);
-        vwidth = VCOS_ALIGN_UP(vwidth, 32); // DSC
-        break;
-        /* height */
-      case 37:
-        vheight = atoi(optarg);
-        vheight = VCOS_ALIGN_UP(vheight, 16); // DSC
-        break;
-      default:
-        DBG("default case\n");
-        help();
-        return 1;
     }
-  }
 
-  if (vwidth < 0 && width < 0) width = 640;
-  if (vheight < 0 && height < 0) height = 480;
-  if (vwidth < 0) vwidth = width;
-  if (vheight < 0) vheight = height;
-  if (width < 0) width = vwidth;
-  if (height < 0) height = vheight;
+    if (vwidth < 0 && width < 0) width = 640;
+    if (vheight < 0 && height < 0) height = 480;
+    if (vwidth < 0) vwidth = width;
+    if (vheight < 0) vheight = height;
+    if (width < 0) width = vwidth;
+    if (height < 0) height = vheight;
 
-  pglobal = param->global;
+    pglobal = param->global;
 
-  IPRINT("fps.............: %i\n", fps);
-  IPRINT("resolution........: %i x %i\n", width, height);
-  IPRINT("camera parameters..............:\n\n");
-  raspicamcontrol_dump_parameters(&c_params);
-
-  return 0;
+    raspicamcontrol_log_parameters(fps, width, height, vwidth, vheight,
+            &c_params);
+    return 0;
 }
 
 /******************************************************************************
@@ -479,41 +506,51 @@ int input_init(input_parameter *param, int plugin_no)
   Input Value.: -
   Return Value: 0
  ******************************************************************************/
-int input_stop(int id)
-{
-  DBG("will cancel input thread\n");
-  pthread_cancel(worker);
-
-  return 0;
+int input_stop(int id) {
+    pthread_cancel(worker);
+    return 0;
 }
 
 /**************************************************
   Print which status
  **************************************************/
-void log_mmal_status(MMAL_STATUS_T status)
-{
-  if (status != MMAL_SUCCESS)
-  {
-    switch (status)
-    {
-      case MMAL_ENOMEM : LOG_ERROR("Out of memory\n"); break;
-      case MMAL_ENOSPC : LOG_ERROR("Out of resources (other than memory)\n"); break;
-      case MMAL_EINVAL: LOG_ERROR("Argument is invalid\n"); break;
-      case MMAL_ENOSYS : LOG_ERROR("Function not implemented\n"); break;
-      case MMAL_ENOENT : LOG_ERROR("No such file or directory\n"); break;
-      case MMAL_ENXIO : LOG_ERROR("No such device or address\n"); break;
-      case MMAL_EIO : LOG_ERROR("I/O error\n"); break;
-      case MMAL_ESPIPE : LOG_ERROR("Illegal seek\n"); break;
-      case MMAL_ECORRUPT : LOG_ERROR("Data is corrupt \attention FIXME: not POSIX\n"); break;
-      case MMAL_ENOTREADY :LOG_ERROR("Component is not ready \attention FIXME: not POSIX\n"); break;
-      case MMAL_ECONFIG : LOG_ERROR("Component is not configured \attention FIXME: not POSIX\n"); break;
-      case MMAL_EISCONN : LOG_ERROR("Port is already connected\n"); break;
-      case MMAL_ENOTCONN : LOG_ERROR("Port is disconnected\n"); break;
-      case MMAL_EAGAIN : LOG_ERROR("Resource temporarily unavailable. Try again later\n"); break;
-      case MMAL_EFAULT : LOG_ERROR("Bad address\n"); break;
-      default : LOG_ERROR("Unknown status error\n"); break;
+const char* log_mmal_status(MMAL_STATUS_T status) {
+    if (status != MMAL_SUCCESS) {
+        switch (status) {
+        case MMAL_ENOMEM:
+            return "Out of memory";
+        case MMAL_ENOSPC:
+            return "Out of resources (other than memory)";
+        case MMAL_EINVAL:
+            return "Argument is invalid";
+        case MMAL_ENOSYS:
+            return "Function not implemented";
+        case MMAL_ENOENT:
+            return "No such file or directory";
+        case MMAL_ENXIO:
+            return "No such device or address";
+        case MMAL_EIO:
+            return "I/O error";
+        case MMAL_ESPIPE:
+            return "Illegal seek";
+        case MMAL_ECORRUPT:
+            return "Data is corrupt";
+        case MMAL_ENOTREADY:
+            return "Component is not ready";
+        case MMAL_ECONFIG:
+            return "Component is not configured";
+        case MMAL_EISCONN:
+            return "Port is already connected";
+        case MMAL_ENOTCONN:
+            return "Port is disconnected";
+        case MMAL_EAGAIN:
+            return "Resource temporarily unavailable";
+        case MMAL_EFAULT:
+            return "Bad address";
+        default:
+            return "Unknown status error";
+        }
     }
-  }
 }
 
 
@@ -530,7 +567,9 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
     MMAL_BUFFER_HEADER_T *new_buffer;
     Splitter_Callback_Data *pData = (Splitter_Callback_Data*)port->userdata;
     fprintf(stderr, "splitter: %u %lld %lld %lld len= %d (%d x %d)\n",
-            pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length, port->format->es->video.width, port->format->es->video.height);
+            pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(),
+            buffer->length, port->format->es->video.width,
+            port->format->es->video.height);
 
     if (pData != NULL) {
         unsigned char* img = buffer->data;
@@ -544,18 +583,18 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
             int64_t now = get_cam_host_usec(&udp_comms);
             Udp_Blob_List udp_blob_list;
             yuv420_get_pixel(cols, rows, img, cols / 2, rows / 2,
-                             pData->yuv_meas);
+                    pData->yuv_meas);
             detect_color_blobs(&pData->blob_list, pData->blob_yuv_min[0],
                     pData->blob_yuv_min[1], pData->blob_yuv_max[1],
                     pData->blob_yuv_min[2], pData->blob_yuv_max[2],
                     false, cols, rows, img);
 #define MIN_PIXELS_PER_BLOB 30
             (void)blob_list_purge_small_bboxes(&pData->blob_list,
-                                               MIN_PIXELS_PER_BLOB);
+                    MIN_PIXELS_PER_BLOB);
             pthread_mutex_lock(&pData->bbox_mutex);
             pData->bbox_element_count =
-                    copy_best_bounding_boxes(&pData->blob_list, MAX_BBOXES * 4,
-                                             pData->bbox_element);
+                copy_best_bounding_boxes(&pData->blob_list, MAX_BBOXES * 4,
+                        pData->bbox_element);
             pthread_mutex_unlock(&pData->bbox_mutex);
             //printf("bbox_element_count= %d\n", pData->bbox_element_count);
             udp_blob_list.msg_id = ID_UDP_BLOB_LIST;
@@ -563,13 +602,10 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
             udp_blob_list.filler[1] = 0;
             udp_blob_list.filler[2] = 0;
             udp_blob_list.blob_count = copy_best_bboxes_to_blob_stats_array(
-                                                        &pData->blob_list,
-                                                        MAX_UDP_BLOBS,
-                                                        &udp_blob_list.blob[0]);
-            if (udp_comms_send_blobs_to_all(&udp_comms,
-                                            now, &udp_blob_list) < 0) {
-                printf("can't udp_comm_send_blobs_to_all\n");
-            }
+                    &pData->blob_list,
+                    MAX_UDP_BLOBS,
+                    &udp_blob_list.blob[0]);
+            (void)udp_comms_send_blobs_to_all(&udp_comms, now, &udp_blob_list);
         }
         mmal_buffer_header_mem_unlock(buffer);
         if (pData->yuv_fp != NULL) {
@@ -602,138 +638,132 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
 /******************************************************************************
   Callback from mmal JPEG encoder
  ******************************************************************************/
-static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buffer)
-{
-  int complete = 0;
+static void encoder_buffer_callback(MMAL_PORT_T *port,
+                                    MMAL_BUFFER_HEADER_T *buffer) {
+    int complete = 0;
 
-  // We pass our file handle and other stuff in via the userdata field.
-  PORT_USERDATA *pData = (PORT_USERDATA *)port->userdata;
-  fprintf(stderr, "encoder: %u %lld %lld %lld len= %d flags= %x\n", pData->frame_no,
-          buffer->pts, buffer->dts, vcos_getmicrosecs64(), buffer->length, buffer->flags);
+    // We pass our file handle and other stuff in via the userdata field.
+    PORT_USERDATA *pData = (PORT_USERDATA *)port->userdata;
+    fprintf(stderr, "encoder: %u %lld %lld %lld len= %d flags= %x\n",
+            pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(),
+            buffer->length, buffer->flags);
 
-  if (pData)
-  {
-    if (buffer->length)
-    {
-      mmal_buffer_header_mem_lock(buffer);
+    if (pData) {
+        if (buffer->length) {
+            mmal_buffer_header_mem_lock(buffer);
 
-      //fprintf(stderr, "The flags are %x of length %i offset %i\n", buffer->flags, buffer->length, pData->offset);
-
-      //Write bytes
-      /* copy JPG picture to global buffer */
-      if(pData->offset == 0)
-        pthread_mutex_lock(&pglobal->in[plugin_number].db);
+            //Write bytes
+            /* copy JPG picture to global buffer */
+            if (pData->offset == 0) {
+                pthread_mutex_lock(&pglobal->in[plugin_number].db);
+            }
 
 #define SEND_BBOXES
 #ifdef SEND_BBOXES
-      if (buffer->data[0] == 0xff &&
-          buffer->data[1] == 0xd8 &&
-          buffer->data[2] == 0xff &&
-          buffer->data[3] == 0xe1) {
+            if (buffer->data[0] == 0xff &&
+                buffer->data[1] == 0xd8 &&
+                buffer->data[2] == 0xff &&
+                buffer->data[3] == 0xe1) {
 
-          /* Send the bounding boxes and gains in the image packets by
-             overwriting the TIFF tags in the header supplied by Broadcom. */
+                /* Send the bounding boxes and gains in the image packets by
+                   overwriting the TIFF tags in the header supplied by
+                   Broadcom. */
 
-          const unsigned int SIZE_FIELD_OFFSET = 4;
-          unsigned int total_header_bytes = SIZE_FIELD_OFFSET +
-                      (((unsigned int)buffer->data[4] << 8) | buffer->data[5]);
-          const unsigned int TIFF_TAGS_OFFSET = 12;
-          pthread_mutex_lock(&pData->splitter_data_ptr->bbox_mutex);
-          overwrite_tif_tags(
-                pData->width, pData->height, pData->vwidth, pData->vheight,
-                pData->splitter_data_ptr->bbox_element_count,
-                pData->splitter_data_ptr->bbox_element, settings.exposure,
-                settings.analog_gain.num / (float)settings.analog_gain.den,
-                settings.digital_gain.num / (float)settings.digital_gain.den,
-                settings.awb_red_gain.num / (float)settings.awb_red_gain.den,
-                settings.awb_blue_gain.num / (float)settings.awb_blue_gain.den,
-                pData->splitter_data_ptr->yuv_meas, buffer->data);
-          pthread_mutex_unlock(&pData->splitter_data_ptr->bbox_mutex);
-      }
+                const unsigned int SIZE_FIELD_OFFSET = 4;
+                unsigned int total_header_bytes = SIZE_FIELD_OFFSET +
+                    (((unsigned int)buffer->data[4] << 8) | buffer->data[5]);
+                const unsigned int TIFF_TAGS_OFFSET = 12;
+                pthread_mutex_lock(&pData->splitter_data_ptr->bbox_mutex);
+                overwrite_tif_tags(
+                    pData->width, pData->height, pData->vwidth, pData->vheight,
+                    pData->splitter_data_ptr->bbox_element_count,
+                    pData->splitter_data_ptr->bbox_element, settings.exposure,
+                    settings.analog_gain.num / (float)settings.analog_gain.den,
+                    settings.digital_gain.num /
+                                             (float)settings.digital_gain.den,
+                    settings.awb_red_gain.num /
+                                             (float)settings.awb_red_gain.den,
+                    settings.awb_blue_gain.num /
+                                             (float)settings.awb_blue_gain.den,
+                    pData->splitter_data_ptr->yuv_meas, buffer->data);
+                pthread_mutex_unlock(&pData->splitter_data_ptr->bbox_mutex);
+            }
 #endif
 #ifdef DSC
-      if (debug_fp != NULL) {
-        if (buffer->data[0] == 0xff &&
-            buffer->data[1] == 0xd8 &&
-            buffer->data[2] == 0xff &&
-            buffer->data[3] == 0xe1) {
-            unsigned int len = ((unsigned int)buffer->data[4] << 8) | buffer->data[5];
-            fprintf(debug_fp, "ff d8 ff e1");
-            int ii;
-            for (ii = 0; ii < len; ++ii) {
-                fprintf(debug_fp, " %02x", buffer->data[ii + 4]);
+            if (debug_fp != NULL) {
+                // Hex dump of jpeg image buffer.
+                if (buffer->data[0] == 0xff &&
+                        buffer->data[1] == 0xd8 &&
+                        buffer->data[2] == 0xff &&
+                        buffer->data[3] == 0xe1) {
+                    unsigned int len =
+                        ((unsigned int)buffer->data[4] << 8) | buffer->data[5];
+                    fprintf(debug_fp, "ff d8 ff e1");
+                    int ii;
+                    for (ii = 0; ii < len; ++ii) {
+                        fprintf(debug_fp, " %02x", buffer->data[ii + 4]);
+                    }
+                    fprintf(debug_fp, "\n");
+                    fflush(debug_fp);
+                }
             }
-            fprintf(debug_fp, "\n");
-            fflush(debug_fp);
-        }
-      }
 #endif
-      memcpy(pData->offset + pglobal->in[plugin_number].buf, buffer->data, buffer->length);
-      pData->offset += buffer->length;
-      mmal_buffer_header_mem_unlock(buffer);
+            memcpy(pData->offset + pglobal->in[plugin_number].buf,
+                   buffer->data, buffer->length);
+            pData->offset += buffer->length;
+            mmal_buffer_header_mem_unlock(buffer);
+        }
+
+        // Now flag if we have completed
+        if (buffer->flags & (MMAL_BUFFER_HEADER_FLAG_FRAME_END |
+                             MMAL_BUFFER_HEADER_FLAG_TRANSMISSION_FAILED)) {
+            //set frame size
+            pglobal->in[plugin_number].size = pData->offset;
+
+            //Set frame timestamp
+            if(wantTimestamp) {
+                gettimeofday(&timestamp, NULL);
+                pglobal->in[plugin_number].timestamp = timestamp;
+            }
+
+            //mark frame complete
+            complete = 1;
+
+            pData->offset = 0;
+            ++pData->frame_no;
+            /* signal fresh_frame */
+            pthread_cond_broadcast(&pglobal->in[plugin_number].db_update);
+            pthread_mutex_unlock(&pglobal->in[plugin_number].db);
+        }
+    } else {
+        LOG_ERROR("Received a encoder buffer callback with no state\n");
     }
 
-    // Now flag if we have completed
-    if (buffer->flags & (MMAL_BUFFER_HEADER_FLAG_FRAME_END | MMAL_BUFFER_HEADER_FLAG_TRANSMISSION_FAILED))
-    {
-      //set frame size
-      pglobal->in[plugin_number].size = pData->offset;
+    // release buffer back to the pool
+    mmal_buffer_header_release(buffer);
 
-      //Set frame timestamp
-      if(wantTimestamp)
-      {
-        gettimeofday(&timestamp, NULL);
-        pglobal->in[plugin_number].timestamp = timestamp;
-      }
+    // and send one back to the port (if still open)
+    if (port->is_enabled) {
+        MMAL_STATUS_T status;
+        MMAL_BUFFER_HEADER_T *new_buffer;
 
-      //mark frame complete
-      complete = 1;
+        new_buffer = mmal_queue_get(pData->pool->queue);
 
-      pData->offset = 0;
-      ++pData->frame_no;
-      /* signal fresh_frame */
-      pthread_cond_broadcast(&pglobal->in[plugin_number].db_update);
-      pthread_mutex_unlock(&pglobal->in[plugin_number].db);
+        if (new_buffer) {
+            status = mmal_port_send_buffer(port, new_buffer);
+
+            if (status != MMAL_SUCCESS) {
+                LOG_ERROR(
+                       "Failed returning a buffer to the encoder port (%s)\n",
+                          log_mmal_status(status));
+            }
+        } else {
+            LOG_ERROR("Unable to return a buffer to the encoder port\n");
+        }
     }
-  }
-  else
-  {
-    LOG_ERROR("Received a encoder buffer callback with no state\n");
-  }
-
-  // release buffer back to the pool
-  mmal_buffer_header_release(buffer);
-
-  // and send one back to the port (if still open)
-  if (port->is_enabled)
-  {
-    MMAL_STATUS_T status;
-    MMAL_BUFFER_HEADER_T *new_buffer;
-
-    new_buffer = mmal_queue_get(pData->pool->queue);
-
-    if (new_buffer)
-    {
-      status = mmal_port_send_buffer(port, new_buffer);
-
-      if(status != MMAL_SUCCESS)
-      {
-        LOG_ERROR("Failed returning a buffer to the encoder port \n");
-        log_mmal_status(status);
-      }
-
-    }
-    else
-    {
-      LOG_ERROR("Unable to return a buffer to the encoder port\n");
-    }
-
-  }
-
-  if (complete)
-    vcos_semaphore_post(&(pData->complete_semaphore));
-
+    if (complete) vcos_semaphore_post(&(pData->complete_semaphore));
 }
+
 
 /**
  * buffer header callback function for camera control
@@ -744,7 +774,7 @@ static void encoder_buffer_callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buf
  * @param buffer mmal buffer header pointer
  */
 static void camera_control_callback(MMAL_PORT_T *port,
-                                    MMAL_BUFFER_HEADER_T *buffer) {
+        MMAL_BUFFER_HEADER_T *buffer) {
     if (buffer->cmd == MMAL_EVENT_PARAMETER_CHANGED) {
 #define DSC1
 #ifdef DSC1
@@ -754,42 +784,25 @@ static void camera_control_callback(MMAL_PORT_T *port,
             case MMAL_PARAMETER_CAMERA_SETTINGS: {
                  MMAL_PARAMETER_CAMERA_SETTINGS_T* sptr = &settings;
                  *sptr = *(MMAL_PARAMETER_CAMERA_SETTINGS_T*)param;
-                /*
-                printf(
-                 "Exposure now %u, analog gain %u/%u, digital gain %u/%u ",
-                       settings.exposure,
-                       settings.analog_gain.num, settings.analog_gain.den,
-                       settings.digital_gain.num, settings.digital_gain.den);
-                printf("AWB R=%u/%u, B=%u/%u\n",
-                       settings.awb_red_gain.num, settings.awb_red_gain.den,
-                       settings.awb_blue_gain.num,
-                       settings.awb_blue_gain.den);
-                */
-                break;
-            }
-            /*
-            case MMAL_PARAMETER_CAPTURE_STATUS: {
-                 MMAL_PARAMETER_CAPTURE_STATUS_T* status_ptr =
-                                    (MMAL_PARAMETER_CAPTURE_STATUS_T*)param;
-                if (status_ptr->status ==
-                              MMAL_PARAM_CAPTURE_STATUS_CAPTURE_STARTED) {
-                    printf("Capture Started\n");
-                } else if (status_ptr->status ==
-                              MMAL_PARAM_CAPTURE_STATUS_CAPTURE_ENDED) {
-                    printf("Capture Ended\n");
-                }
-                break;
-            }
-            */
+                 /*
+                    printf(
+                    "Exposure now %u, analog gain %u/%u, digital gain %u/%u ",
+                    settings.exposure,
+                    settings.analog_gain.num, settings.analog_gain.den,
+                    settings.digital_gain.num, settings.digital_gain.den);
+                    printf("AWB R=%u/%u, B=%u/%u\n",
+                    settings.awb_red_gain.num, settings.awb_red_gain.den,
+                    settings.awb_blue_gain.num,
+                    settings.awb_blue_gain.den);
+                  */
+                 break;
+             }
         }
-#else
-        fprintf(stderr, "camera_control\n");
 #endif
     } else {
         LOG_ERROR("Received unexpected camera control callback event %d",
-                  buffer->cmd);
+                buffer->cmd);
     }
-
     mmal_buffer_header_release(buffer);
 }
 
@@ -806,113 +819,116 @@ static void camera_control_callback(MMAL_PORT_T *port,
 static Component_Pool create_resizer_component(
                                         MMAL_COMPONENT_T* camera_component,
                                         int width,
-                                        int height)
-{
-   Component_Pool pair = { NULL, NULL };
-   MMAL_COMPONENT_T *resizer = 0;
-   MMAL_PORT_T *resizer_output = NULL;
-   MMAL_ES_FORMAT_T *format;
-   MMAL_STATUS_T status;
-   MMAL_POOL_T *pool;
-   int i;
+                                        int height) {
+    Component_Pool pair = { NULL, NULL };
+    MMAL_COMPONENT_T *resizer = 0;
+    MMAL_PORT_T *resizer_output = NULL;
+    MMAL_ES_FORMAT_T *format;
+    MMAL_STATUS_T status;
+    MMAL_POOL_T *pool;
+    int i;
 
-   if (camera_component == NULL) {
-      status = MMAL_ENOSYS;
-      LOG_ERROR("Camera component must be created before resizer");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (camera_component == NULL) {
+        status = MMAL_ENOSYS;
+        LOG_ERROR("Camera component must be created before resizer (%s)\n",
+                log_mmal_status(status));
+        goto error;
+    }
 
-   /* Create the component */
+    /* Create the component */
 
 
 #define MMAL_COMPONENT_RESIZER "vc.ril.resize"
-//#define MMAL_COMPONENT_RESIZER "vc.ril.isp"
-   status = mmal_component_create(MMAL_COMPONENT_RESIZER, &resizer);
+    //#define MMAL_COMPONENT_RESIZER "vc.ril.isp"
+    status = mmal_component_create(MMAL_COMPONENT_RESIZER, &resizer);
 
-   if (status != MMAL_SUCCESS) {
-      LOG_ERROR("Failed to create resizer component");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("Failed to create resizer component (%s)\n",
+                log_mmal_status(status));
+        goto error;
+    }
 
-   if (resizer->input_num == 0) {
-      status = MMAL_ENOSYS;
-      LOG_ERROR("resizer doesn't have any input port");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (resizer->input_num == 0) {
+        status = MMAL_ENOSYS;
+        LOG_ERROR("resizer has no input port (%s)\n",
+                log_mmal_status(status));
+        goto error;
+    }
 
-   if (resizer->output_num == 0) {
-      status = MMAL_ENOSYS;
-      LOG_ERROR("resizer doesn't have enough output ports");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (resizer->output_num == 0) {
+        status = MMAL_ENOSYS;
+        LOG_ERROR("resizer has no output port (%s)\n",
+                log_mmal_status(status));
+        goto error;
+    }
 
-   /* Ensure there are enough buffers to avoid dropping frames: */
-   mmal_format_copy(resizer->input[0]->format,
-                    camera_component->output[MMAL_CAMERA_VIDEO_PORT]->format);
+    /* Ensure there are enough buffers to avoid dropping frames: */
+    mmal_format_copy(resizer->input[0]->format,
+            camera_component->output[MMAL_CAMERA_VIDEO_PORT]->format);
 
 
-   if (resizer->input[0]->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
-      resizer->input[0]->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
-   }
-   status = mmal_port_format_commit(resizer->input[0]);
+    if (resizer->input[0]->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
+        resizer->input[0]->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+    }
+    status = mmal_port_format_commit(resizer->input[0]);
 
-   if (status != MMAL_SUCCESS) {
-      LOG_ERROR("Unable to set format on resizer input port");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("Unable to set format on resizer input port (%s)\n",
+                log_mmal_status(status));
+        goto error;
+    }
 
-   /* resizer can do format conversions, configure format for its output port: */
-   mmal_format_copy(resizer->output[0]->format, resizer->input[0]->format);
-   if (resizer->output[0]->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
-      resizer->output[0]->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
-   }
+    /* Resizer can do format conversions, configure format for its output
+       port: */
+    mmal_format_copy(resizer->output[0]->format, resizer->input[0]->format);
+    if (resizer->output[0]->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
+        resizer->output[0]->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+    }
 
-   /* Here is where we change the size. */
+    /* Here is where we change the size. */
 
-   width = VCOS_ALIGN_UP(width, 32);
-   height = VCOS_ALIGN_UP(height, 16);
-   resizer->output[0]->format->es->video.width = width;
-   resizer->output[0]->format->es->video.height = height;
-   resizer->output[0]->format->es->video.crop.width = width;
-   resizer->output[0]->format->es->video.crop.height = height;
-   status = mmal_port_format_commit(resizer->output[0]);
+    width = VCOS_ALIGN_UP(width, 32);
+    height = VCOS_ALIGN_UP(height, 16);
+    resizer->output[0]->format->es->video.width = width;
+    resizer->output[0]->format->es->video.height = height;
+    resizer->output[0]->format->es->video.crop.width = width;
+    resizer->output[0]->format->es->video.crop.height = height;
+    status = mmal_port_format_commit(resizer->output[0]);
 
-   if (status != MMAL_SUCCESS) {
-      LOG_ERROR("Unable to set format on resizer output port %d", i);
-      log_mmal_status(status);
-      goto error;
-   }
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("Unable to set format on resizer output port %d (%s)\n",
+                i, log_mmal_status(status));
+        goto error;
+    }
 
-   /* Enable component */
-   status = mmal_component_enable(resizer);
+    /* Enable component */
 
-   if (status != MMAL_SUCCESS) {
-      LOG_ERROR("resizer component couldn't be enabled");
-      log_mmal_status(status);
-      goto error;
-   }
+    status = mmal_component_enable(resizer);
 
-   /* Create pool of buffer headers for the output port to consume */
-   resizer_output = resizer->output[0];
-   pool = mmal_port_pool_create(resizer_output, resizer_output->buffer_num,
-                                resizer_output->buffer_size);
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("resizer component couldn't be enabled (%s)\n",
+                log_mmal_status(status));
+        goto error;
+    }
 
-   if (!pool) {
-      LOG_ERROR("Failed to create buffer header pool for resizer output port %s", resizer_output->name);
-   }
+    /* Create pool of buffer headers for the output port to consume */
 
-   pair.pool_ptr = pool;
-   pair.component_ptr = resizer;
-   return pair;
+    resizer_output = resizer->output[0];
+    pool = mmal_port_pool_create(resizer_output, resizer_output->buffer_num,
+            resizer_output->buffer_size);
 
+    if (!pool) {
+        LOG_ERROR(
+        "Failed to create buffer header pool for resizer output port %s",
+                  resizer_output->name);
+    }
+
+    pair.pool_ptr = pool;
+    pair.component_ptr = resizer;
+    return pair;
 error:
-   if (resizer) mmal_component_destroy(resizer);
-   return pair;
+    if (resizer) mmal_component_destroy(resizer);
+    return pair;
 }
 
 
@@ -928,116 +944,110 @@ error:
  *
  */
 static Component_Pool create_splitter_component(
-                                        MMAL_COMPONENT_T* camera_component)
-{
-   Component_Pool pair = { NULL, NULL };
-   MMAL_COMPONENT_T *splitter = 0;
-   MMAL_PORT_T *splitter_output = NULL;
-   MMAL_ES_FORMAT_T *format;
-   MMAL_STATUS_T status;
-   MMAL_POOL_T *pool;
-   int i;
+                                          MMAL_COMPONENT_T* camera_component) {
+    Component_Pool pair = { NULL, NULL };
+    MMAL_COMPONENT_T *splitter = 0;
+    MMAL_PORT_T *splitter_output = NULL;
+    MMAL_ES_FORMAT_T *format;
+    MMAL_STATUS_T status;
+    MMAL_POOL_T *pool;
+    int i;
 
-   if (camera_component == NULL)
-   {
-      status = MMAL_ENOSYS;
-      LOG_ERROR("Camera component must be created before splitter");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (camera_component == NULL) {
+        status = MMAL_ENOSYS;
+        LOG_ERROR("Camera component must be created before splitter (%s)\n",
+                log_mmal_status(status));
+        goto error;
+    }
 
-   /* Create the component */
-   status = mmal_component_create(MMAL_COMPONENT_DEFAULT_VIDEO_SPLITTER, &splitter);
+    /* Create the component */
+    status = mmal_component_create(MMAL_COMPONENT_DEFAULT_VIDEO_SPLITTER,
+                                   &splitter);
 
-   if (status != MMAL_SUCCESS)
-   {
-      LOG_ERROR("Failed to create splitter component");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("Failed to create splitter component (%s)\n",
+                  log_mmal_status(status));
+        goto error;
+    }
 
-   if (!splitter->input_num)
-   {
-      status = MMAL_ENOSYS;
-      LOG_ERROR("Splitter doesn't have any input port");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (!splitter->input_num) {
+        status = MMAL_ENOSYS;
+        LOG_ERROR("Splitter doesn't have any input port (%s)\n",
+                  log_mmal_status(status));
+        goto error;
+    }
 
-   if (splitter->output_num < 2)
-   {
-      status = MMAL_ENOSYS;
-      LOG_ERROR("Splitter doesn't have enough output ports");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (splitter->output_num < 2) {
+        status = MMAL_ENOSYS;
+        LOG_ERROR("Splitter doesn't have enough output ports (%s)\n",
+                  log_mmal_status(status));
+        goto error;
+    }
 
-   /* Ensure there are enough buffers to avoid dropping frames: */
-   mmal_format_copy(splitter->input[0]->format, camera_component->output[MMAL_CAMERA_PREVIEW_PORT]->format);
+    /* Ensure there are enough buffers to avoid dropping frames: */
+    mmal_format_copy(splitter->input[0]->format,
+                camera_component->output[MMAL_CAMERA_PREVIEW_PORT]->format);
 
-   if (splitter->input[0]->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM)
-      splitter->input[0]->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+    if (splitter->input[0]->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
+        splitter->input[0]->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+    }
 
-   status = mmal_port_format_commit(splitter->input[0]);
+    status = mmal_port_format_commit(splitter->input[0]);
 
-   if (status != MMAL_SUCCESS)
-   {
-      LOG_ERROR("Unable to set format on splitter input port");
-      log_mmal_status(status);
-      goto error;
-   }
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("Unable to set format on splitter input port (%s)\n",
+                  log_mmal_status(status));
+        goto error;
+    }
 
-   /* Splitter can do format conversions, configure format for its output port: */
-   for (i = 0; i < splitter->output_num; i++)
-   {
-      mmal_format_copy(splitter->output[i]->format, splitter->input[0]->format);
+    /* Splitter can do format conversions, configure format for its output
+       port. */
 
-      if (i == SPLITTER_CALLBACK_PORT)
-      {
-         format = splitter->output[i]->format;
-         format->encoding = MMAL_ENCODING_I420;
-         format->encoding_variant = MMAL_ENCODING_I420;
-      }
+    for (i = 0; i < splitter->output_num; i++) {
+        mmal_format_copy(splitter->output[i]->format,
+                         splitter->input[0]->format);
 
-      status = mmal_port_format_commit(splitter->output[i]);
+        if (i == SPLITTER_CALLBACK_PORT) {
+            format = splitter->output[i]->format;
+            format->encoding = MMAL_ENCODING_I420;
+            format->encoding_variant = MMAL_ENCODING_I420;
+        }
 
-      if (status != MMAL_SUCCESS)
-      {
-         LOG_ERROR("Unable to set format on splitter output port %d", i);
-         log_mmal_status(status);
-         goto error;
-      }
-   }
+        status = mmal_port_format_commit(splitter->output[i]);
 
-   /* Enable component */
-   status = mmal_component_enable(splitter);
+        if (status != MMAL_SUCCESS) {
+            LOG_ERROR("Unable to set format on splitter output port %d (%s)\n",
+                      i, log_mmal_status(status));
+            goto error;
+        }
+    }
 
-   if (status != MMAL_SUCCESS)
-   {
-      LOG_ERROR("splitter component couldn't be enabled");
-      log_mmal_status(status);
-      goto error;
-   }
+    /* Enable component */
+    status = mmal_component_enable(splitter);
 
-   /* Create pool of buffer headers for the output port to consume */
-   splitter_output = splitter->output[SPLITTER_CALLBACK_PORT];
-   pool = mmal_port_pool_create(splitter_output, splitter_output->buffer_num, splitter_output->buffer_size);
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("splitter component couldn't be enabled (%s)\n",
+                  log_mmal_status(status));
+        goto error;
+    }
 
-   if (!pool)
-   {
-      LOG_ERROR("Failed to create buffer header pool for splitter output port %s", splitter_output->name);
-   }
+    /* Create pool of buffer headers for the output port to consume */
+    splitter_output = splitter->output[SPLITTER_CALLBACK_PORT];
+    pool = mmal_port_pool_create(splitter_output, splitter_output->buffer_num,
+                                 splitter_output->buffer_size);
 
-   pair.pool_ptr = pool;
-   pair.component_ptr = splitter;
-   return pair;
+    if (!pool) {
+        LOG_ERROR(
+            "Failed to create buffer header pool for splitter output port %s",
+                  splitter_output->name);
+    }
 
+    pair.pool_ptr = pool;
+    pair.component_ptr = splitter;
+    return pair;
 error:
-
-   if (splitter)
-      mmal_component_destroy(splitter);
-
-   return pair;
+    if (splitter) mmal_component_destroy(splitter);
+    return pair;
 }
 
 
@@ -1047,22 +1057,20 @@ error:
  * @param state Pointer to state control struct
  *
  */
-static void destroy_splitter_component(Component_Pool* pair_ptr)
-{
-   // Get rid of any port buffers first
-   if (pair_ptr->pool_ptr)
-   {
-      mmal_port_pool_destroy(
-                        pair_ptr->component_ptr->output[SPLITTER_CALLBACK_PORT],
-                        pair_ptr->pool_ptr);
-      pair_ptr->pool_ptr = NULL;
-   }
+static void destroy_splitter_component(Component_Pool* pair_ptr) {
+    // Get rid of any port buffers first
 
-   if (pair_ptr->component_ptr)
-   {
-      mmal_component_destroy(pair_ptr->component_ptr);
-      pair_ptr->component_ptr = NULL;
-   }
+    if (pair_ptr->pool_ptr) {
+        mmal_port_pool_destroy(
+                pair_ptr->component_ptr->output[SPLITTER_CALLBACK_PORT],
+                pair_ptr->pool_ptr);
+        pair_ptr->pool_ptr = NULL;
+    }
+
+    if (pair_ptr->component_ptr) {
+        mmal_component_destroy(pair_ptr->component_ptr);
+        pair_ptr->component_ptr = NULL;
+    }
 }
 
 
@@ -1071,24 +1079,19 @@ static void destroy_splitter_component(Component_Pool* pair_ptr)
   Input Value.: -
   Return Value: 0
  ******************************************************************************/
-int input_run(int id)
-{
-  pglobal->in[id].buf = malloc(width * height * 3);
-  if (pglobal->in[id].buf == NULL)
-  {
-    fprintf(stderr, "could not allocate memory\n");
-    exit(EXIT_FAILURE);
-  }
-
-  if (pthread_create(&worker, 0, worker_thread, NULL) != 0)
-  {
-    free(pglobal->in[id].buf);
-    fprintf(stderr, "could not start worker thread\n");
-    exit(EXIT_FAILURE);
-  }
-  pthread_detach(worker);
-
-  return 0;
+int input_run(int id) {
+    pglobal->in[id].buf = malloc(width * height * 3);
+    if (pglobal->in[id].buf == NULL) {
+        LOG_ERROR("can't malloc(%d)\n", width * height * 3);
+        exit(EXIT_FAILURE);
+    }
+    if (pthread_create(&worker, 0, worker_thread, NULL) != 0) {
+        free(pglobal->in[id].buf);
+        LOG_ERROR("can't pthread_create(worker_thread)\n");
+        exit(EXIT_FAILURE);
+    }
+    pthread_detach(worker);
+    return 0;
 }
 
 /**
@@ -1100,29 +1103,27 @@ int input_run(int id)
  * @return Returns a MMAL_STATUS_T giving result of operation
  *
  */
-static MMAL_STATUS_T connect_ports(MMAL_PORT_T *output_port, MMAL_PORT_T *input_port, MMAL_CONNECTION_T **connection)
-{
-  MMAL_STATUS_T status;
-
-  status = mmal_connection_create(connection, output_port, input_port, MMAL_CONNECTION_FLAG_TUNNELLING | MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
-
-  if (status == MMAL_SUCCESS)
-  {
-    status = mmal_connection_enable(*connection);
-    if (status != MMAL_SUCCESS)
-    {
-      LOG_ERROR("Error enabling mmal connection\n");
-      log_mmal_status(status);
-      mmal_connection_destroy(*connection);
-      *connection = NULL;
+static MMAL_STATUS_T connect_ports(MMAL_PORT_T *output_port,
+                                   MMAL_PORT_T *input_port,
+                                   MMAL_CONNECTION_T **connection) {
+    MMAL_STATUS_T status;
+    status = mmal_connection_create(connection, output_port, input_port,
+                                    MMAL_CONNECTION_FLAG_TUNNELLING |
+                                    MMAL_CONNECTION_FLAG_ALLOCATION_ON_INPUT);
+    if (status == MMAL_SUCCESS) {
+        status = mmal_connection_enable(*connection);
+        if (status != MMAL_SUCCESS) {
+            LOG_ERROR("can't mmal_connection_enable (%s)\n",
+                      log_mmal_status(status));
+            mmal_connection_destroy(*connection);
+            *connection = NULL;
+        }
+    } else {
+        LOG_ERROR("can't mmal_connection_create (%s)\n",
+                  log_mmal_status(status));
+        *connection = NULL;
     }
-  } else {
-    LOG_ERROR("Error creating mmal connection\n");
-    log_mmal_status(status);
-    *connection = NULL;
-  }
-
-  return status;
+    return status;
 }
 
 
@@ -1133,37 +1134,40 @@ static MMAL_STATUS_T connect_ports(MMAL_PORT_T *output_port, MMAL_PORT_T *input_
  ******************************************************************************/
 void help(void)
 {
-  fprintf(stderr, " ---------------------------------------------------------------\n" \
-      " Help for input plugin..: "INPUT_PLUGIN_NAME"\n" \
-      " ---------------------------------------------------------------\n" \
-      " The following parameters can be passed to this plugin:\n\n" \
-      " [-fps | --framerate]...: set video framerate, default 5 frame/sec \n"\
-      " [-x | --width ]........: width of frame capture, default 640\n" \
-      " [-y | --height]........: height of frame capture, default 480 \n"\
-      " [-quality].............: set JPEG quality 0-100, default 85 \n"\
-      " [-usestills]...........: uses stills mode instead of video mode \n"\
-      " [-preview].............: Enable full screen preview\n"\
-      " [-timestamp]...........: Get timestamp for each frame\n"
-      " [-writeyuv]............: Write to out_WWWW_HHHH.yuv\n"
-      " \n"\
-      " -sh  : Set image sharpness (-100 to 100)\n"\
-      " -co  : Set image contrast (-100 to 100)\n"\
-      " -br  : Set image brightness (0 to 100)\n"\
-      " -sa  : Set image saturation (-100 to 100)\n"\
-      " -ISO : Set capture ISO\n"\
-      " -vs  : Turn on video stablisation\n"\
-      " -ev  : Set EV compensation\n"\
-      " -ex  : Set exposure mode (see raspistill notes)\n"\
-      " -awb : Set AWB mode (see raspistill notes)\n"\
-      " -ifx : Set image effect (see raspistill notes)\n"\
-      " -cfx : Set colour effect (U:V)\n"\
-      " -mm  : Set metering mode (see raspistill notes)\n"\
-      " -rot : Set image rotation (0-359)\n"\
-      " -stats : Compute image stats for each picture (reduces noise for -usestills)\n"\
-      " -drc : Dynamic range compensation level (see raspistill notes)\n"\
-      " -hf  : Set horizontal flip\n"\
-      " -vf  : Set vertical flip\n"\
-      " ---------------------------------------------------------------\n");
+  fprintf(stderr,
+" ---------------------------------------------------------------\n" \
+" Help for input plugin..: "INPUT_PLUGIN_NAME"\n" \
+" ---------------------------------------------------------------\n" \
+" The following parameters can be passed to this plugin:\n\n" \
+" [-fps | --framerate]...: set video framerate, default 5 frame/sec \n"\
+" [-x | --width ]........: width of frame capture, default 640\n" \
+" [-y | --height]........: height of frame capture, default 480 \n"\
+" [--vwidth ]............: width of video stream\n" \
+" [--vheight]............: height of video stream\n"\
+" [-quality].............: set JPEG quality 0-100, default 85 \n"\
+" [-usestills]...........: uses stills mode instead of video mode \n"\
+" [-preview].............: Enable full screen preview\n"\
+" [-timestamp]...........: Get timestamp for each frame\n"
+" [-writeyuv]............: Write to out_WWWW_HHHH.yuv\n"
+" \n"\
+" -sh  : Set image sharpness (-100 to 100)\n"\
+" -co  : Set image contrast (-100 to 100)\n"\
+" -br  : Set image brightness (0 to 100)\n"\
+" -sa  : Set image saturation (-100 to 100)\n"\
+" -ISO : Set capture ISO\n"\
+" -vs  : Turn on video stablisation\n"\
+" -ev  : Set EV compensation\n"\
+" -ex  : Set exposure mode (see raspistill notes)\n"\
+" -awb : Set AWB mode (see raspistill notes)\n"\
+" -ifx : Set image effect (see raspistill notes)\n"\
+" -cfx : Set colour effect (U:V)\n"\
+" -mm  : Set metering mode (see raspistill notes)\n"\
+" -rot : Set image rotation (0-359)\n"\
+" -stats : Compute image stats for each picture (reduces noise for -usestills)\n"\
+" -drc : Dynamic range compensation level (see raspistill notes)\n"\
+" -hf  : Set horizontal flip\n"\
+" -vf  : Set vertical flip\n"\
+" ---------------------------------------------------------------\n");
 
 }
 
@@ -1172,18 +1176,21 @@ void help(void)
   Input Value.: arg is not used
   Return Value: NULL
  ******************************************************************************/
-void *worker_thread(void *arg)
-{
-  int i = 0;
+void *worker_thread(void *arg) {
+    int i = 0;
 
-  /* set cleanup handler to cleanup allocated resources */
-  pthread_cleanup_push(worker_cleanup, NULL);
-  //Lets not let this thread be cancelled, it needs to clean up mmal on exit
-  if (pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL) != 0)
-  {
-    fprintf(stderr, "Unable to set cancel state\n");
-    exit(EXIT_FAILURE);
-  }
+    // Set cleanup handler to cleanup allocated resources.
+
+    pthread_cleanup_push(worker_cleanup, NULL);
+
+    // Dont' let this thread be cancelled.  It needs to clean up mmal on exit.
+
+    if (pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL) != 0) {
+        LOG_ERROR("can't pthread_setcancelstate\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* Start udp_comms thread. */
 
 //#define DEFAULT_UDP_COMMS_CLIENT_NAME "127.0.0.1"
 #define DEFAULT_UDP_COMMS_CLIENT_NAME NULL
@@ -1191,694 +1198,668 @@ void *worker_thread(void *arg)
 #define USECS_PER_SECOND 1000000
 #define MAX_ROUND_TRIP_USECS (USECS_PER_SECOND / 8)
 #define CLOCK_SAMPLES 500
-  udp_comms_construct(&udp_comms, DEFAULT_UDP_COMMS_CLIENT_NAME, 
-                      DEFAULT_UDP_COMMS_CLIENT_PORT, CLOCK_SAMPLES,
-                      MAX_ROUND_TRIP_USECS, false);
+    udp_comms_construct(&udp_comms, DEFAULT_UDP_COMMS_CLIENT_NAME, 
+            DEFAULT_UDP_COMMS_CLIENT_PORT, CLOCK_SAMPLES,
+            MAX_ROUND_TRIP_USECS, false);
 
-  IPRINT("Starting Camera\n");
+    //Camera variables
 
-  //Camera variables
-  MMAL_COMPONENT_T *camera = 0;
-  MMAL_COMPONENT_T *preview = 0;
-  MMAL_ES_FORMAT_T *format;
-  MMAL_STATUS_T status;
-  MMAL_PORT_T *camera_preview_port = NULL;
-  MMAL_PORT_T *camera_video_port = NULL;
-  MMAL_PORT_T *camera_still_port = NULL;
-  MMAL_PORT_T *preview_input_port = NULL;
-  MMAL_PORT_T *splitter_callback_port = NULL;
+    MMAL_COMPONENT_T *camera = 0;
+    MMAL_COMPONENT_T *preview = 0;
+    MMAL_ES_FORMAT_T *format;
+    MMAL_STATUS_T status;
+    MMAL_PORT_T *camera_preview_port = NULL;
+    MMAL_PORT_T *camera_video_port = NULL;
+    MMAL_PORT_T *camera_still_port = NULL;
+    MMAL_PORT_T *preview_input_port = NULL;
+    MMAL_PORT_T *splitter_callback_port = NULL;
 
+    // Preview variables
 
-  MMAL_CONNECTION_T *preview_connection = 0;
+    MMAL_CONNECTION_T *preview_connection = 0;
 
-  //Encoder variables
-  MMAL_COMPONENT_T *encoder = 0;
-  MMAL_PORT_T *encoder_input = NULL;
-  MMAL_PORT_T *encoder_output = NULL;
-  MMAL_POOL_T *pool;
-  MMAL_CONNECTION_T *encoder_connection;
+    //Encoder variables
+    
+    MMAL_COMPONENT_T *encoder = 0;
+    MMAL_PORT_T *encoder_input = NULL;
+    MMAL_PORT_T *encoder_output = NULL;
+    MMAL_POOL_T *pool;
+    MMAL_CONNECTION_T *encoder_connection;
 
-  // Splitter variables
-  Component_Pool splitter_pair;
-  MMAL_CONNECTION_T *splitter_connection = NULL;
+    // Splitter variables
 
-  // Resizer variables
-  Component_Pool resizer_pair;
-  MMAL_CONNECTION_T *resizer_connection = NULL;
+    Component_Pool splitter_pair;
+    MMAL_CONNECTION_T *splitter_connection = NULL;
 
-  //fps count
-  struct timespec t_start, t_finish;
-  double t_elapsed;
-  int frames;
+    // Resizer variables
 
-  //Create camera code
-  bcm_host_init();
-  DBG("Host init, starting mmal stuff\n");
+    Component_Pool resizer_pair;
+    MMAL_CONNECTION_T *resizer_connection = NULL;
 
-  status = mmal_component_create(MMAL_COMPONENT_DEFAULT_CAMERA, &camera);
-  if (status != MMAL_SUCCESS)
-  {
-    fprintf(stderr, "error create camera\n");
-    exit(EXIT_FAILURE);
-  }
+    // FPS count
 
-  if (!camera->output_num)
-  {
-    fprintf(stderr, "Camera doesn't have output ports\n");
-    mmal_component_destroy(camera);
-    exit(EXIT_FAILURE);
-  }
+    struct timespec t_start, t_finish;
+    double t_elapsed;
+    int frames;
 
-  camera_preview_port = camera->output[MMAL_CAMERA_PREVIEW_PORT];
-  camera_video_port = camera->output[MMAL_CAMERA_VIDEO_PORT];
-  camera_still_port = camera->output[MMAL_CAMERA_CAPTURE_PORT];
+    // Create camera
 
-  //Enable camera control port
-  // Enable the camera, and tell it its control callback function
+    bcm_host_init();
+    DBG("Host init, starting mmal stuff\n");
+
+    status = mmal_component_create(MMAL_COMPONENT_DEFAULT_CAMERA, &camera);
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("can't mmal_component_create(camera)\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (!camera->output_num) {
+        LOG_ERROR("camera has no output port\n");
+        mmal_component_destroy(camera);
+        exit(EXIT_FAILURE);
+    }
+
+    camera_preview_port = camera->output[MMAL_CAMERA_PREVIEW_PORT];
+    camera_video_port = camera->output[MMAL_CAMERA_VIDEO_PORT];
+    camera_still_port = camera->output[MMAL_CAMERA_CAPTURE_PORT];
+
+    // Enable camera control port
+    // Enable the camera, and tell it its control callback function
 #ifdef DSC1
-  MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T change_event_request =
-                         { { MMAL_PARAMETER_CHANGE_EVENT_REQUEST,
-                             sizeof(MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T) },
-                          MMAL_PARAMETER_CAMERA_SETTINGS, 1 };
-  (void)mmal_port_parameter_set(camera->control, &change_event_request.hdr);
-  /* Doesn't work with video
-  MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T change_event_request2 =
-                         { { MMAL_PARAMETER_CHANGE_EVENT_REQUEST,
-                             sizeof(MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T) },
-                          MMAL_PARAMETER_CAPTURE_STATUS, 1 };
-  (void)mmal_port_parameter_set(camera->control, &change_event_request2.hdr);
-  */
+    MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T change_event_request =
+                    { { MMAL_PARAMETER_CHANGE_EVENT_REQUEST,
+                          sizeof(MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T) },
+                      MMAL_PARAMETER_CAMERA_SETTINGS, 1 };
+    (void)mmal_port_parameter_set(camera->control, &change_event_request.hdr);
+
+    /* Doesn't work with video
+       MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T change_event_request2 =
+       { { MMAL_PARAMETER_CHANGE_EVENT_REQUEST,
+           sizeof(MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T) },
+         MMAL_PARAMETER_CAPTURE_STATUS, 1 };
+       (void)mmal_port_parameter_set(camera->control,
+                                     &change_event_request2.hdr); */
 #endif
-  status = mmal_port_enable(camera->control, camera_control_callback);
-#ifdef DSC1
-  /* THIS IS HOW YOU GET THE TIME FROM THE CAMERA. 
-     Time is in microseconds (since boot).
-     This should match the frame time stamp (if you are in raw mode).
-  */
-  typedef struct {
-      MMAL_PARAMETER_HEADER_T hdr;
-      uint64_t time;
-  } Time_Request;
-  Time_Request time_request = { { MMAL_PARAMETER_SYSTEM_TIME,
-                                  sizeof(Time_Request) },
+    status = mmal_port_enable(camera->control, camera_control_callback);
+#ifdef DSC2
+    /* THIS IS HOW YOU GET THE TIME FROM THE CAMERA. 
+       Time is in microseconds (since boot).
+       This should match the frame time stamp (if you are in raw mode). */
+
+    typedef struct {
+        MMAL_PARAMETER_HEADER_T hdr;
+        uint64_t time;
+    } Time_Request;
+    Time_Request time_request = { { MMAL_PARAMETER_SYSTEM_TIME,
+                                    sizeof(Time_Request) },
                                   0 };
-  mmal_port_parameter_get(camera->control, &time_request.hdr);
-  printf("*********** time = %lld\n", time_request.time);
+    mmal_port_parameter_get(camera->control, &time_request.hdr);
+    struct timespec sys_time;
+    clock_gettime(CLOCK_MONOTONIC, &sys_time);
+    printf("*********** cam_time = %lld %lld\n", time_request.time,
+           (sys_time.tv_sec * (int64_t)1000000 +
+            sys_time.tv_nsec / (int64_t)1000));
 
-  /* Query GPU for how much memory it is using. See raspicamcontrol_get_mem().
-     Memory is in megabytes.
-     The split between GPU and CPU memory is set by running "sudo raspi-config"
-     */
-  char response[80] = "";
-  int gpu_mem = 0;
-  if (vc_gencmd(response, sizeof response, "get_mem gpu") == 0)
-  vc_gencmd_number_property(response, "gpu", &gpu_mem);
-  printf("*********** gpu_mem = %d\n", gpu_mem);
+    /* Query GPU for how much memory it is using. See raspicamcontrol_get_mem().
+       Memory is in megabytes.  The split between GPU and CPU memory is set
+       by running "sudo raspi-config" */
 
+    char response[80] = "";
+    int gpu_mem = 0;
+    if (vc_gencmd(response, sizeof response, "get_mem gpu") == 0) {
+        vc_gencmd_number_property(response, "gpu", &gpu_mem);
+    }
+    printf("*********** gpu_mem = %d\n", gpu_mem);
 #endif
 
-  if (status)
-  {
-    fprintf(stderr, "Unable to enable camera port\n");
-    mmal_component_destroy(camera);
-    exit(EXIT_FAILURE);
-  }
+    if (status) {
+        LOG_ERROR("can't mmal_port_enable(camera_control_callback)\n");
+        mmal_component_destroy(camera);
+        exit(EXIT_FAILURE);
+    }
+    {
+        MMAL_PARAMETER_CAMERA_CONFIG_T cam_config = {
+            { MMAL_PARAMETER_CAMERA_CONFIG, sizeof (cam_config)},
+            .max_stills_w = width,
+            .max_stills_h = height,
+            .stills_yuv422 = 0,
+            .one_shot_stills = (usestills ? 1 : 0),
+            .max_preview_video_w = width,
+            .max_preview_video_h = height,
+            .num_preview_video_frames = 3,
+            .stills_capture_circular_buffer_height = 0,
+            .fast_preview_resume = 0,
+            .use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RESET_STC
+            // consider .use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RAW_STC
+        };
+        mmal_port_parameter_set(camera->control, &cam_config.hdr);
+    }
 
+    //Set camera parameters
 
-  {
-    MMAL_PARAMETER_CAMERA_CONFIG_T cam_config = {
-      { MMAL_PARAMETER_CAMERA_CONFIG, sizeof (cam_config)},
-      .max_stills_w = width,
-      .max_stills_h = height,
-      .stills_yuv422 = 0,
-      .one_shot_stills = (usestills ? 1 : 0),
-      .max_preview_video_w = width,
-      .max_preview_video_h = height,
-      .num_preview_video_frames = 3,
-      .stills_capture_circular_buffer_height = 0,
-      .fast_preview_resume = 0,
-      .use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RESET_STC
-      // consider .use_stc_timestamp = MMAL_PARAM_TIMESTAMP_MODE_RAW_STC
-    };
-    mmal_port_parameter_set(camera->control, &cam_config.hdr);
-  }
+    if (raspicamcontrol_set_all_parameters(camera, &c_params)) {
+        LOG_ERROR("can't raspicamcontrol_set_all_parameters\n");
+        exit(EXIT_FAILURE);
+    }
 
-  //Set camera parameters
-  if (raspicamcontrol_set_all_parameters(camera, &c_params))
-    fprintf(stderr, "camera parameters couldn't be set\n");
+    // Set the encode format on the Preview port
 
-  // Set the encode format on the Preview port
+    format = camera_preview_port->format;
+    format->encoding = MMAL_ENCODING_OPAQUE;
+    format->encoding_variant = MMAL_ENCODING_I420;  // DSC
+    format->es->video.width = VCOS_ALIGN_UP(width, 32);
+    format->es->video.height = VCOS_ALIGN_UP(height, 16);
+    format->es->video.crop.x = 0;
+    format->es->video.crop.y = 0;
+    format->es->video.crop.width = width;
+    format->es->video.crop.height = height;
+    format->es->video.frame_rate.num = PREVIEW_FRAME_RATE_NUM;
+    format->es->video.frame_rate.den = PREVIEW_FRAME_RATE_DEN;
 
-  format = camera_preview_port->format;
-  format->encoding = MMAL_ENCODING_OPAQUE;
-  format->encoding_variant = MMAL_ENCODING_I420;  // DSC
-  format->es->video.width = VCOS_ALIGN_UP(width, 32);
-  format->es->video.height = VCOS_ALIGN_UP(height, 16);
-  format->es->video.crop.x = 0;
-  format->es->video.crop.y = 0;
-  format->es->video.crop.width = width;
-  format->es->video.crop.height = height;
-  format->es->video.frame_rate.num = PREVIEW_FRAME_RATE_NUM;
-  format->es->video.frame_rate.den = PREVIEW_FRAME_RATE_DEN;
+    status = mmal_port_format_commit(camera_preview_port);
 
-  status = mmal_port_format_commit(camera_preview_port);
+    // Create preview component
 
-  // Create preview component
-  status = mmal_component_create(MMAL_COMPONENT_DEFAULT_VIDEO_RENDERER, &preview);
+    status = mmal_component_create(MMAL_COMPONENT_DEFAULT_VIDEO_RENDERER,
+                                   &preview);
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("can't mmal_component_create(preview)\n");
+        exit(EXIT_FAILURE);
+    }
+    if (!preview->input_num) {
+        status = MMAL_ENOSYS;
+        LOG_ERROR("preview component has no input ports\n");
+        exit(EXIT_FAILURE);
+    }
+    preview_input_port = preview->input[0];
 
-  if (status != MMAL_SUCCESS)
-  {
-    fprintf(stderr, "Unable to create preview component\n");
-    exit(EXIT_FAILURE);
-  }
+    MMAL_DISPLAYREGION_T param;
+    param.hdr.id = MMAL_PARAMETER_DISPLAYREGION;
+    param.hdr.size = sizeof(MMAL_DISPLAYREGION_T);
+    param.set = MMAL_DISPLAY_SET_LAYER;
+    param.layer = PREVIEW_LAYER;
+    param.set |= MMAL_DISPLAY_SET_ALPHA;
+    param.alpha = 255;
+    param.set |= MMAL_DISPLAY_SET_FULLSCREEN;
+    param.fullscreen = 1;
+    status = mmal_port_parameter_set(preview_input_port, &param.hdr);
 
-  if (!preview->input_num)
-  {
-    status = MMAL_ENOSYS;
-    fprintf(stderr, "No input ports found on preview component");
-    exit(EXIT_FAILURE);
-  }
+    if (status != MMAL_SUCCESS && status != MMAL_ENOSYS) {
+        LOG_ERROR("can't mmal_port_parameter_set(preview_input_port) (%u)\n",
+                status);
+        exit(EXIT_FAILURE);
+    }
 
-  preview_input_port = preview->input[0];
+    if (!usestills) {
+        // Set the encode format on the video port
+        format = camera_video_port->format;
+        format->encoding_variant = MMAL_ENCODING_I420;
+        format->encoding = MMAL_ENCODING_I420;
+        //format->encoding_variant = MMAL_ENCODING_OPAQUE; //DSC
+        format->es->video.width = width;
+        format->es->video.height = height;
+        format->es->video.crop.x = 0;
+        format->es->video.crop.y = 0;
+        format->es->video.crop.width = width;
+        format->es->video.crop.height = height;
+        format->es->video.frame_rate.num = fps;
+        format->es->video.frame_rate.den = 1;
+        status = mmal_port_format_commit(camera_video_port);
+        if (status) {
+            LOG_ERROR("can't mmal_port_format_commit(camera_video_port)\n");
+            exit(EXIT_FAILURE);
+        }
 
-  MMAL_DISPLAYREGION_T param;
-  param.hdr.id = MMAL_PARAMETER_DISPLAYREGION;
-  param.hdr.size = sizeof(MMAL_DISPLAYREGION_T);
+        // Ensure there are enough buffers to avoid dropping frames
+        if (camera_video_port->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
+            camera_video_port->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+        }
+    }
 
-  param.set = MMAL_DISPLAY_SET_LAYER;
-  param.layer = PREVIEW_LAYER;
+    // Set our stills format on the stills (for encoder) port
 
-  param.set |= MMAL_DISPLAY_SET_ALPHA;
-  param.alpha = 255;
-
-  param.set |= MMAL_DISPLAY_SET_FULLSCREEN;
-  param.fullscreen = 1;
-
-  status = mmal_port_parameter_set(preview_input_port, &param.hdr);
-
-  if (status != MMAL_SUCCESS && status != MMAL_ENOSYS)
-  {
-   fprintf(stderr, "unable to set preview port parameters (%u)", status);
-   exit(EXIT_FAILURE);
-  }
-
-  if (!usestills)
-  {
-    // Set the encode format on the video port
-    format = camera_video_port->format;
-    format->encoding_variant = MMAL_ENCODING_I420;
-    format->encoding = MMAL_ENCODING_I420;
-    //format->encoding_variant = MMAL_ENCODING_OPAQUE; //DSC
+    format = camera_still_port->format;
+    format->encoding = MMAL_ENCODING_OPAQUE;
     format->es->video.width = width;
     format->es->video.height = height;
     format->es->video.crop.x = 0;
     format->es->video.crop.y = 0;
     format->es->video.crop.width = width;
     format->es->video.crop.height = height;
-    format->es->video.frame_rate.num = fps;
-    format->es->video.frame_rate.den = 1;
-    status = mmal_port_format_commit(camera_video_port);
-    if (status)
-      fprintf(stderr, "camera video format couldn't be set");
+    format->es->video.frame_rate.num = STILLS_FRAME_RATE_NUM;
+    format->es->video.frame_rate.den = STILLS_FRAME_RATE_DEN;
 
-    // Ensure there are enough buffers to avoid dropping frames
-    if (camera_video_port->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM)
-      camera_video_port->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
-  }
+    status = mmal_port_format_commit(camera_still_port);
+    if (status) {
+        LOG_ERROR("can't mmal_port_format_commit(camera_still_port)\n");
+        mmal_component_destroy(camera);
+        exit(EXIT_FAILURE);
+    }
 
-  format = camera_still_port->format;
+    /* Ensure there are enough buffers to avoid dropping frames */
 
-  // Set our stills format on the stills (for encoder) port
-  format->encoding = MMAL_ENCODING_OPAQUE;
-  format->es->video.width = width;
-  format->es->video.height = height;
-  format->es->video.crop.x = 0;
-  format->es->video.crop.y = 0;
-  format->es->video.crop.width = width;
-  format->es->video.crop.height = height;
-  format->es->video.frame_rate.num = STILLS_FRAME_RATE_NUM;
-  format->es->video.frame_rate.den = STILLS_FRAME_RATE_DEN;
+    if (camera_still_port->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM) {
+        camera_still_port->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+    }
 
-  status = mmal_port_format_commit(camera_still_port);
+    /* Enable camera component */
 
-  if (status)
-  {
-    fprintf(stderr, "format couldn't be set\n");
-    mmal_component_destroy(camera);
-    exit(EXIT_FAILURE);
-  }
+    status = mmal_component_enable(camera);
+    if (status) {
+        LOG_ERROR("can't mmal_component_enable(camera) (%u)\n", status);
+        mmal_component_destroy(camera);
+        exit(EXIT_FAILURE);
+    }
 
-  /* Ensure there are enough buffers to avoid dropping frames */
-  if (camera_still_port->buffer_num < VIDEO_OUTPUT_BUFFERS_NUM)
-    camera_still_port->buffer_num = VIDEO_OUTPUT_BUFFERS_NUM;
+    /* Enable preview component */
 
+    status = mmal_component_enable(preview);
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("can't mmal_component_enable(preview) (%u)\n", status);
+        mmal_component_destroy(preview);
+        mmal_component_destroy(camera);
+        exit(EXIT_FAILURE);
+    }
 
-  /* Enable component */
-  status = mmal_component_enable(camera);
-  if (status)
-  {
-    fprintf(stderr, "camera couldn't be enabled\n");
-    mmal_component_destroy(camera);
-    exit(EXIT_FAILURE);
-  }
+    // Create Encoder
 
-  /* Enable component */
-  status = mmal_component_enable(preview);
-  if (status != MMAL_SUCCESS)
-  {
-    fprintf(stderr, "Unable to enable preview/null sink component (%u)\n", status);
-    mmal_component_destroy(preview);
-    mmal_component_destroy(camera);
-    exit(EXIT_FAILURE);
-  }
+    status = mmal_component_create(MMAL_COMPONENT_DEFAULT_IMAGE_ENCODER,
+                                   &encoder);
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("can't mmal_component_create(encoder) (%u)\n", status);
+        mmal_component_destroy(camera);
+        if (encoder) mmal_component_destroy(encoder);
+        exit(EXIT_FAILURE);
+    }
+    if (!encoder->input_num || !encoder->output_num) {
+        LOG_ERROR("not enough encoder ports\n");
+        mmal_component_destroy(camera);
+        if (encoder) mmal_component_destroy(encoder);
+        exit(EXIT_FAILURE);
+    }
+    encoder_input = encoder->input[0];
+    encoder_output = encoder->output[0];
 
-  DBG("Camera enabled, creating encoder\n");
+    // We want the same format on input and output.
 
-  //Create Encoder
-  status = mmal_component_create(MMAL_COMPONENT_DEFAULT_IMAGE_ENCODER, &encoder);
+    mmal_format_copy(encoder_output->format, encoder_input->format);
 
-  if (status != MMAL_SUCCESS)
-  {
-    fprintf(stderr, "Unable to create JPEG encoder component\n");
-    mmal_component_destroy(camera);
-    if (encoder)
-      mmal_component_destroy(encoder);
-    exit(EXIT_FAILURE);
-  }
+    // Specify out output format JPEG.
 
-  if (!encoder->input_num || !encoder->output_num)
-  {
-    fprintf(stderr, "Unable to create JPEG encoder input/output ports\n");
-    mmal_component_destroy(camera);
-    if (encoder)
-      mmal_component_destroy(encoder);
-    exit(EXIT_FAILURE);
-  }
+    encoder_output->format->encoding = MMAL_ENCODING_JPEG;
+    encoder_output->buffer_size = encoder_output->buffer_size_recommended;
+    if (encoder_output->buffer_size < encoder_output->buffer_size_min) {
+        encoder_output->buffer_size = encoder_output->buffer_size_min;
+    }
+    encoder_output->buffer_num = encoder_output->buffer_num_recommended;
+    if (encoder_output->buffer_num < encoder_output->buffer_num_min) {
+        encoder_output->buffer_num = encoder_output->buffer_num_min;
+    }
 
-  encoder_input = encoder->input[0];
-  encoder_output = encoder->output[0];
+    // Commit the port changes to the output port
 
+    status = mmal_port_format_commit(encoder_output);
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("can't mmal_port_format_commit(encoder_output)\n");
+        mmal_component_destroy(camera);
+        if (encoder) mmal_component_destroy(encoder);
+        exit(EXIT_FAILURE);
+    }
 
-  // We want same format on input and output
-  mmal_format_copy(encoder_output->format, encoder_input->format);
+    // Set the JPEG quality level
 
-  // Specify out output format JPEG
-  encoder_output->format->encoding = MMAL_ENCODING_JPEG;
+    status = mmal_port_parameter_set_uint32(encoder_output,
+             MMAL_PARAMETER_JPEG_Q_FACTOR,
+             quality);
+    if (status != MMAL_SUCCESS) {
+        LOG_ERROR("can't set jpeg quality\n");
+        mmal_component_destroy(camera);
+        if (encoder) mmal_component_destroy(encoder);
+        exit(EXIT_FAILURE);
+    }
 
-  encoder_output->buffer_size = encoder_output->buffer_size_recommended;
+    // Enable encoder component
 
+    status = mmal_component_enable(encoder);
+    if (status) {
+        LOG_ERROR("can't set jpeg quality\n");
+        mmal_component_destroy(camera);
+        if (encoder)
+            mmal_component_destroy(encoder);
+        exit(EXIT_FAILURE);
+    }
+    DBG("Encoder enabled, creating pool and connecting ports\n");
 
-  if (encoder_output->buffer_size < encoder_output->buffer_size_min)
-    encoder_output->buffer_size = encoder_output->buffer_size_min;
+    /* Create pool of buffer headers for the output port to consume */
+    pool = mmal_port_pool_create(encoder_output, encoder_output->buffer_num,
+                                 encoder_output->buffer_size);
+    if (!pool) {
+        LOG_ERROR("can't mmal_port_pool_create(encoder_output)\n");
+        mmal_component_destroy(camera);
+        if (encoder) mmal_component_destroy(encoder);
+        exit(EXIT_FAILURE);
+    }
 
-  fprintf(stderr,"Encoder Buffer Size %i\n", encoder_output->buffer_size);
+    // Set up optional splitter component
 
-  encoder_output->buffer_num = encoder_output->buffer_num_recommended;
+    status = MMAL_SUCCESS;
+    if (splitter_callback_data.detect_yuv ||
+        splitter_callback_data.yuv_fp != NULL) {
+        splitter_pair = create_splitter_component(camera);
+        if (splitter_pair.component_ptr == NULL) status = MMAL_ENOSYS;
+    }
 
-  if (encoder_output->buffer_num < encoder_output->buffer_num_min)
-    encoder_output->buffer_num = encoder_output->buffer_num_min;
+    if (status == MMAL_SUCCESS) {
+        if (wantPreview) {
+            if (splitter_callback_data.detect_yuv ||
+                splitter_callback_data.yuv_fp != NULL) {
+                // Connect camera preview output to splitter input
 
-  // Commit the port changes to the output port
-  status = mmal_port_format_commit(encoder_output);
+                status = connect_ports(camera_preview_port,
+                                       splitter_pair.component_ptr->input[0],
+                                       &splitter_connection);
 
-  if (status != MMAL_SUCCESS)
-  {
-    fprintf(stderr, "Unable to set video format output ports\n");
-    mmal_component_destroy(camera);
-    if (encoder)
-      mmal_component_destroy(encoder);
-    exit(EXIT_FAILURE);
-  }
+                if (status != MMAL_SUCCESS) {
+                    LOG_ERROR(
+                "can't connect_ports(camera_preview, splitter_input) (%s)\n",
+                              log_mmal_status(status));
+                } else {
+                    // Connect splitter preview output to preview input
 
-  // Set the JPEG quality level
-  status = mmal_port_parameter_set_uint32(encoder_output, MMAL_PARAMETER_JPEG_Q_FACTOR, quality);
-
-  if (status != MMAL_SUCCESS)
-  {
-    fprintf(stderr, "Unable to set JPEG quality\n");
-    mmal_component_destroy(camera);
-    if (encoder)
-      mmal_component_destroy(encoder);
-    exit(EXIT_FAILURE);
-  }
-
-
-  // Enable encoder component
-  status = mmal_component_enable(encoder);
-
-  if (status)
-  {
-    fprintf(stderr, "Unable to enable encoder component\n");
-    mmal_component_destroy(camera);
-    if (encoder)
-      mmal_component_destroy(encoder);
-    exit(EXIT_FAILURE);
-  }
-
-
-  DBG("Encoder enabled, creating pool and connecting ports\n");
-
-  /* Create pool of buffer headers for the output port to consume */
-  pool = mmal_port_pool_create(encoder_output, encoder_output->buffer_num, encoder_output->buffer_size);
-
-  if (!pool)
-  {
-    fprintf(stderr, "Can't create buffer header pool for encoder output port\n");
-    mmal_component_destroy(camera);
-    if (encoder)
-      mmal_component_destroy(encoder);
-    exit(EXIT_FAILURE);
-  }
-
-
-  // Set up optional splitter component
-
-  status = MMAL_SUCCESS;
-  if (splitter_callback_data.detect_yuv ||
-      splitter_callback_data.yuv_fp != NULL)
-  {
-      splitter_pair = create_splitter_component(camera);
-      if (splitter_pair.component_ptr == NULL) status = MMAL_ENOSYS;
-  }
-
-  if (status == MMAL_SUCCESS) {
-    if (wantPreview)
-    {
-      if (splitter_callback_data.detect_yuv ||
-          splitter_callback_data.yuv_fp != NULL) {
-        // Connect camera preview output to splitter input
-  
-        status = connect_ports(camera_preview_port,
-                               splitter_pair.component_ptr->input[0],
-                               &splitter_connection);
-  
-        if (status != MMAL_SUCCESS)
-        {
-           LOG_ERROR("Can't connect camera preview output to splitter input");
-           log_mmal_status(status);
+                    status = connect_ports(
+                     splitter_pair.component_ptr->output[SPLITTER_PREVIEW_PORT],
+                                           preview_input_port,
+                                           &preview_connection);
+                    if (status != MMAL_SUCCESS) {
+                        LOG_ERROR(
+                "can't connect_ports(splitter_preview, preview_input) (%s)\n",
+                                log_mmal_status(status));
+                    }
+                }
+            } else {
+                // Connect camera to preview
+                status = connect_ports(camera_preview_port, preview_input_port,
+                                       &preview_connection);
+                if (status != MMAL_SUCCESS) {
+                    LOG_ERROR(
+                   "can't connect_ports(camera_preview, preview_input) (%s)\n",
+                              log_mmal_status(status));
+                }
+            }
         } else {
-  
-           // Connect splitter preview output to preview input
-  
-           status = connect_ports(
-                   splitter_pair.component_ptr->output[SPLITTER_PREVIEW_PORT],
-                   preview_input_port, &preview_connection);
-           if (status != MMAL_SUCCESS)
-           {
-             LOG_ERROR("Can't connect splitter preview output to preview input");
-             log_mmal_status(status);
-           }
-        }
-  
-      } else {
-        // Connect camera to preview
-        status = connect_ports(camera_preview_port, preview_input_port,
-                               &preview_connection);
-        if (status != MMAL_SUCCESS)
-        {
-          LOG_ERROR("Can't connect camera to preview input");
-          log_mmal_status(status);
-        }
-      }
-    } else {
-      if (splitter_callback_data.detect_yuv ||
-          splitter_callback_data.yuv_fp != NULL)
-      {
-        // Connect camera to splitter
-        status = connect_ports(camera_preview_port,
-                               splitter_pair.component_ptr->input[0],
-                               &splitter_connection);
-  
-        if (status != MMAL_SUCCESS)
-        {
-          LOG_ERROR("Can't connect camera preview port to splitter input");
-          log_mmal_status(status);
-        }
-      } else {
-        // Camera preview port is not used.
-        status = MMAL_SUCCESS;
-      }
-    }
-  } 
+            if (splitter_callback_data.detect_yuv ||
+                    splitter_callback_data.yuv_fp != NULL) {
+                // Connect camera to splitter
 
-  resizer_pair = create_resizer_component(camera, vwidth, vheight);
+                status = connect_ports(camera_preview_port,
+                                       splitter_pair.component_ptr->input[0],
+                                       &splitter_connection);
 
-  // Now connect the camera to the encoder
-  if (status == MMAL_SUCCESS) {
-    if(usestills){
-      status = connect_ports(camera_still_port, encoder->input[0], &encoder_connection);
-    } else {
-#if 0
-      status = connect_ports(camera_video_port, encoder->input[0], &encoder_connection);
-#else
-      status = connect_ports(camera_video_port, resizer_pair.component_ptr->input[0], &resizer_connection);
-      status = connect_ports(resizer_pair.component_ptr->output[0], encoder->input[0], &encoder_connection);
-#endif
-    }
-  }
+                if (status != MMAL_SUCCESS) {
+                    LOG_ERROR(
+                  "can't connect_ports(camera_preview, splitter_input) (%s)\n",
+                              log_mmal_status(status));
+                }
+            } else {
+                // Camera preview port is not used.
 
-  if (status == MMAL_SUCCESS && splitter_connection != NULL) {
-    splitter_callback_data.pool_ptr = splitter_pair.pool_ptr;
-    splitter_callback_port =
-                splitter_pair.component_ptr->output[SPLITTER_CALLBACK_PORT];
-    splitter_callback_port->userdata =
-                      (struct MMAL_PORT_USERDATA_T *)&splitter_callback_data;
-    if (splitter_callback_data.yuv_write) {
-        char filename[32];
-        snprintf(filename, 32, "out.yuv");
-        splitter_callback_data.yuv_fp = fopen(filename, "wb");
-        fprintf(splitter_callback_data.yuv_fp,
-                "#!YUV420 %7u,%7u\n", width, height);
+                status = MMAL_SUCCESS;
+            }
+        }
+    } 
+
+    resizer_pair = create_resizer_component(camera, vwidth, vheight);
+
+    // Now connect the camera to the encoder
+
+    if (status == MMAL_SUCCESS) {
+        if (usestills){
+            status = connect_ports(camera_still_port, encoder->input[0],
+                                   &encoder_connection);
+        } else {
+            status = connect_ports(camera_video_port,
+                                   resizer_pair.component_ptr->input[0],
+                                   &resizer_connection);
+            status = connect_ports(resizer_pair.component_ptr->output[0],
+                                   encoder->input[0], &encoder_connection);
+        }
     }
-    if (splitter_callback_data.test_img_y_value >= 0) {
-        splitter_callback_data.test_img = (unsigned char*)malloc(
+
+    if (status == MMAL_SUCCESS && splitter_connection != NULL) {
+        splitter_callback_data.pool_ptr = splitter_pair.pool_ptr;
+        splitter_callback_port =
+                   splitter_pair.component_ptr->output[SPLITTER_CALLBACK_PORT];
+        splitter_callback_port->userdata =
+                   (struct MMAL_PORT_USERDATA_T *)&splitter_callback_data;
+        if (splitter_callback_data.yuv_write) {
+            char filename[32];
+            snprintf(filename, 32, "out.yuv");
+            splitter_callback_data.yuv_fp = fopen(filename, "wb");
+            fprintf(splitter_callback_data.yuv_fp,
+                    "#!YUV420 %7u,%7u\n", width, height);
+        }
+        if (splitter_callback_data.test_img_y_value >= 0) {
+            splitter_callback_data.test_img = (unsigned char*)malloc(
                                                        width * height * 3 / 2);
-        yuv_color_space_image(width, height,
-                              splitter_callback_data.test_img_y_value,
-                              splitter_callback_data.test_img);
+            yuv_color_space_image(width, height,
+                                  splitter_callback_data.test_img_y_value,
+                                  splitter_callback_data.test_img);
+        }
+        status = mmal_port_enable(splitter_callback_port,
+                                  splitter_buffer_callback);
+        if (status != MMAL_SUCCESS) {
+            LOG_ERROR("can't mmal_port_enable(splitter_buffer_callback)\n");
+        }
     }
-    status = mmal_port_enable(splitter_callback_port, splitter_buffer_callback);
-    if (status != MMAL_SUCCESS)
-    {
-      LOG_ERROR("Can't enable splitter callback port");
-    }
-  }
 
-  if (status)
-  {
-    if (preview_connection) {
-      mmal_connection_destroy(preview_connection);
+    if (status) {
+        if (preview_connection) {
+            mmal_connection_destroy(preview_connection);
+        }
+        if (splitter_connection) {
+            mmal_connection_destroy(splitter_connection);
+        }
+        if (encoder_connection) {
+            mmal_connection_destroy(encoder_connection);
+        }
+        if (resizer_connection) {
+            mmal_connection_destroy(resizer_connection);
+        }
+        if (preview) {
+            mmal_component_destroy(preview);
+        }
+        mmal_component_destroy(camera);
+        if (encoder) {
+            mmal_component_destroy(encoder);
+        }
+        exit(EXIT_FAILURE);
     }
-    if (splitter_connection) {
-      mmal_connection_destroy(splitter_connection);
+
+    /* Set up our userdata - this is passed though to the callback where we
+       need the information. */
+
+    PORT_USERDATA callback_data;
+    callback_data.pool = pool;
+    callback_data.offset = 0;
+    callback_data.frame_no = 0;
+    callback_data.width = width;   // width of original image
+    callback_data.height = height; // height of original image
+    callback_data.vwidth = vwidth;   // width of encode image
+    callback_data.vheight = vheight; // height of encode image
+    callback_data.splitter_data_ptr = &splitter_callback_data;
+
+    vcos_assert(vcos_semaphore_create(&callback_data.complete_semaphore,
+                                      "RaspiStill-sem", 0) == VCOS_SUCCESS);
+
+    encoder->output[0]->userdata =
+                                (struct MMAL_PORT_USERDATA_T *)&callback_data;
+
+
+
+    // Enable the encoder output port and tell it its callback function.
+
+    status = mmal_port_enable(encoder->output[0], encoder_buffer_callback);
+    if (status) {
+        LOG_ERROR("can't mmal_port_enable(encoder_buffer_callback)\n");
+        mmal_component_destroy(camera);
+        if (encoder) mmal_component_destroy(encoder);
+        exit(EXIT_FAILURE);
     }
-    if (encoder_connection) {
-      mmal_connection_destroy(encoder_connection);
+
+    if (usestills) {
+        DBG("Starting stills output\n");
+
+        //setup fps
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
+        frames = 0;
+        int delay = (1000 * 1000) / fps;
+
+        while (!pglobal->stop) {
+            //Wait the delay
+            usleep(delay);
+
+            // Send all the buffers to the encoder output port
+            int num = mmal_queue_length(pool->queue);
+            int q;
+            for (q = 0; q < num; q++) {
+                MMAL_BUFFER_HEADER_T *buffer = mmal_queue_get(pool->queue);
+                if (!buffer) {
+                    LOG_ERROR("can't mmal_queue_get(encoder_pool)\n");
+                    exit(EXIT_FAILURE);
+                }
+                if (mmal_port_send_buffer(encoder->output[0], buffer)
+                                                            != MMAL_SUCCESS) {
+                    LOG_ERROR("can't send a buffer to encoder output port\n");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            if (mmal_port_parameter_set_boolean(camera_still_port,
+                                                MMAL_PARAMETER_CAPTURE, 1)
+                                                            != MMAL_SUCCESS) {
+                LOG_ERROR("can't start camera capture\n");
+                exit(EXIT_FAILURE);
+            } else {
+                /* Wait for capture to complete.
+                   For some reason using vcos_semaphore_wait_timeout sometimes
+                   returns immediately with bad parameter error even though it
+                   appears to be all correct, so reverting to untimed one
+                   until figure out why its erratic. */
+                vcos_semaphore_wait(&callback_data.complete_semaphore);
+            }
+
+            frames++;
+            if (frames == 100) {
+                //calculate fps
+                clock_gettime(CLOCK_MONOTONIC, &t_finish);
+                t_elapsed = (t_finish.tv_sec - t_start.tv_sec);
+                t_elapsed += (t_finish.tv_nsec - t_start.tv_nsec) /
+                                                                  1000000000.0;
+                fprintf(stderr, "%i frames captured in %f seconds (%f fps)\n",
+                        frames, t_elapsed, (frames / t_elapsed));
+                frames = 0;
+                clock_gettime(CLOCK_MONOTONIC, &t_start);
+            }
+        }
+    } else {
+        //Video Mode
+        DBG("Starting video output\n");
+        // Send all the buffers to the encoder output port
+        int num = mmal_queue_length(pool->queue);
+        int q;
+        for (q = 0; q < num; q++) {
+            MMAL_BUFFER_HEADER_T *buffer = mmal_queue_get(pool->queue);
+            if (!buffer) {
+                LOG_ERROR("can't mmal_queue_get(encoder_pool buffer %d)\n", q);
+            }
+            if (mmal_port_send_buffer(encoder->output[0], buffer)
+                                                            != MMAL_SUCCESS) {
+                LOG_ERROR(
+                    "can't mmal_port_send_buffer(encodeer_output_port (%d))\n",
+                          q);
+            }
+        }
+        if (splitter_callback_port != NULL) {
+            int num = mmal_queue_length(splitter_callback_data.pool_ptr->queue);
+            int q;
+            for (q = 0; q < num; q++) {
+                MMAL_BUFFER_HEADER_T *buffer =
+                        mmal_queue_get(splitter_callback_data.pool_ptr->queue);
+
+                if (!buffer) {
+                    LOG_ERROR("can't mmal_queue_get(splitter_pool buffer %d)\n",
+                              q);
+                }
+
+                if (mmal_port_send_buffer(splitter_callback_port, buffer)
+                                                             != MMAL_SUCCESS) {
+                    LOG_ERROR(
+                    "can't mmal_port_send_buffer(spliiter_output_port (%d))\n",
+                              q);
+                }
+            }
+        }
+        if (mmal_port_parameter_set_boolean(camera_video_port,
+                                            MMAL_PARAMETER_CAPTURE, 1)
+                                                             != MMAL_SUCCESS) {
+            LOG_ERROR("can't start capture\n");
+        }
+        while(!pglobal->stop) usleep(1000);
     }
-    if (resizer_connection) {
-      mmal_connection_destroy(resizer_connection);
+
+    vcos_semaphore_delete(&callback_data.complete_semaphore);
+    if (splitter_callback_data.yuv_fp != NULL) {
+        fclose(splitter_callback_data.yuv_fp);
+    }
+
+    // Close everything MMAL
+
+    if (usestills) {
+        if (camera_video_port && camera_video_port->is_enabled) {
+            mmal_port_disable(camera_video_port);
+        }
+    } else {
+        if (camera_still_port && camera_still_port->is_enabled) {
+            mmal_port_disable(camera_still_port);
+        }
+    }
+    if (preview_connection) mmal_connection_destroy(preview_connection);
+    if (encoder->output[0] && encoder->output[0]->is_enabled) {
+        mmal_port_disable(encoder->output[0]);
+    }
+    mmal_connection_destroy(encoder_connection);
+
+    // Disable components
+
+    if (encoder) mmal_component_disable(encoder);
+    if (preview) mmal_component_disable(preview);
+    if (camera) mmal_component_disable(camera);
+
+    // Destroy encoder component.  Get rid of any port buffers first
+
+    if (pool) {
+        mmal_port_pool_destroy(encoder->output[0], pool);
+    }
+
+    if (encoder) {
+        mmal_component_destroy(encoder);
+        encoder = NULL;
     }
     if (preview) {
-      mmal_component_destroy(preview);
-    }
-    mmal_component_destroy(camera);
-    if (encoder) {
-      mmal_component_destroy(encoder);
-    }
-    exit(EXIT_FAILURE);
-  }
-
-  // Set up our userdata - this is passed though to the callback where we need the information.
-  // Null until we open our filename
-  PORT_USERDATA callback_data;
-  callback_data.pool = pool;
-  callback_data.offset = 0;
-  callback_data.frame_no = 0;
-  callback_data.width = width;   // width of original image
-  callback_data.height = height; // height of original image
-  callback_data.vwidth = vwidth;   // width of encode image
-  callback_data.vheight = vheight; // height of encode image
-  callback_data.splitter_data_ptr = &splitter_callback_data;
-
-  vcos_assert(vcos_semaphore_create(&callback_data.complete_semaphore, "RaspiStill-sem", 0) == VCOS_SUCCESS);
-
-  encoder->output[0]->userdata = (struct MMAL_PORT_USERDATA_T *)&callback_data;
-
-
-
-  // Enable the encoder output port and tell it its callback function
-  status = mmal_port_enable(encoder->output[0], encoder_buffer_callback);
-  if (status)
-  {
-    fprintf(stderr, "Unable to enable encoder component\n");
-    mmal_component_destroy(camera);
-    if (encoder)
-      mmal_component_destroy(encoder);
-    exit(EXIT_FAILURE);
-  }
-
-  if(usestills){
-    DBG("Starting stills output\n");
-
-    //setup fps
-    clock_gettime(CLOCK_MONOTONIC, &t_start);
-    frames = 0;
-    int delay = (1000 * 1000) / fps;
-
-    while(!pglobal->stop) {
-      //Wait the delay
-      usleep(delay);
-
-      // Send all the buffers to the encoder output port
-      int num = mmal_queue_length(pool->queue);
-      int q;
-      for (q=0;q<num;q++)
-      {
-        MMAL_BUFFER_HEADER_T *buffer = mmal_queue_get(pool->queue);
-
-        if (!buffer)
-          fprintf(stderr, "Unable to get a required buffer from pool queue");
-
-        if (mmal_port_send_buffer(encoder->output[0], buffer)!= MMAL_SUCCESS)
-          fprintf(stderr, "Unable to send a buffer to encoder output port");
-      }
-
-      if (mmal_port_parameter_set_boolean(camera_still_port, MMAL_PARAMETER_CAPTURE, 1) != MMAL_SUCCESS)
-      {
-        fprintf(stderr, "starting capture failed");
-      }
-      else
-      {
-        // Wait for capture to complete
-        // For some reason using vcos_semaphore_wait_timeout sometimes returns immediately with bad parameter error
-        // even though it appears to be all correct, so reverting to untimed one until figure out why its erratic
-        vcos_semaphore_wait(&callback_data.complete_semaphore);
-        //DBG("Jpeg Captured\n");
-        frames++;
-      }
-
-      frames++;
-      if (frames == 100)
-      {
-        //calculate fps
-        clock_gettime(CLOCK_MONOTONIC, &t_finish);
-        t_elapsed = (t_finish.tv_sec - t_start.tv_sec);
-        t_elapsed += (t_finish.tv_nsec - t_start.tv_nsec) / 1000000000.0;
-        fprintf(stderr, "%i frames captured in %f seconds (%f fps)\n", frames, t_elapsed, (frames / t_elapsed));
-        frames = 0;
-        clock_gettime(CLOCK_MONOTONIC, &t_start);
-      }
+        mmal_component_destroy(preview);
+        preview = NULL;
     }
 
-  }
-  else
-  { //if(usestills)
-    //Video Mode
-    DBG("Starting video output\n");
-    // Send all the buffers to the encoder output port
-    int num = mmal_queue_length(pool->queue);
-    int q;
-    for (q=0;q<num;q++)
-    {
-      MMAL_BUFFER_HEADER_T *buffer = mmal_queue_get(pool->queue);
-      if (!buffer)
-      {
-        LOG_ERROR("Unable to get a required buffer from pool queue");
-      }
-      if (mmal_port_send_buffer(encoder->output[0], buffer)!= MMAL_SUCCESS)
-      {
-        LOG_ERROR("Unable to send a buffer to encoder output port");
-      }
-    }
-    if (splitter_callback_port != NULL)
-    {
-      int num = mmal_queue_length(splitter_callback_data.pool_ptr->queue);
-      int q;
-      for (q = 0; q < num; q++)
-      {
-         MMAL_BUFFER_HEADER_T *buffer =
-                       mmal_queue_get(splitter_callback_data.pool_ptr->queue);
+    // Destroy camera component.
 
-         if (!buffer) {
-            LOG_ERROR("Unable to get a required buffer %d from pool queue", q);
-         }
-
-         if (mmal_port_send_buffer(splitter_callback_port, buffer)
-                                                            != MMAL_SUCCESS) {
-            LOG_ERROR("Unable to send a buffer to splitter output port (%d)", q);
-         }
-      }
-    }
-    if (mmal_port_parameter_set_boolean(
-                camera_video_port, MMAL_PARAMETER_CAPTURE, 1) != MMAL_SUCCESS) {
-      LOG_ERROR("Can't start capture");
+    if (camera) {
+        mmal_component_destroy(camera);
+        camera = NULL;
     }
 
-    while(!pglobal->stop) usleep(1000);
-  }
-
-  vcos_semaphore_delete(&callback_data.complete_semaphore);
-
-  // DSC
-  if (splitter_callback_data.yuv_fp != NULL) {
-    fclose(splitter_callback_data.yuv_fp);
-  }
-
-  //Close everything MMAL
-  if (usestills)
-  {
-    if (camera_video_port && camera_video_port->is_enabled)
-      mmal_port_disable(camera_video_port);
-  }
-  else
-  {
-    if (camera_still_port && camera_still_port->is_enabled)
-      mmal_port_disable(camera_still_port);
-  }
-  if (preview_connection)
-    mmal_connection_destroy(preview_connection);
-
-  if (encoder->output[0] && encoder->output[0]->is_enabled)
-    mmal_port_disable(encoder->output[0]);
-
-  mmal_connection_destroy(encoder_connection);
-
-  // Disable components
-  if (encoder)
-    mmal_component_disable(encoder);
-  if (preview)
-    mmal_component_disable(preview);
-  if (camera)
-    mmal_component_disable(camera);
-
-  //Destroy encoder component
-  // Get rid of any port buffers first
-  if (pool)
-  {
-    mmal_port_pool_destroy(encoder->output[0], pool);
-  }
-
-  if (encoder)
-  {
-    mmal_component_destroy(encoder);
-    encoder = NULL;
-  }
-  if (preview)
-  {
-    mmal_component_destroy(preview);
-    preview = NULL;
-  }
-  //destroy camera component
-  if (camera)
-  {
-    mmal_component_destroy(camera);
-    camera = NULL;
-  }
-
-  DBG("mmal cleanup done\n");
-  pthread_cleanup_pop(1);
-
-  return NULL;
+    DBG("mmal cleanup done\n");
+    pthread_cleanup_pop(1);
+    return NULL;
 }
 
 /******************************************************************************
@@ -1886,19 +1867,17 @@ void *worker_thread(void *arg)
   Input Value.: arg is unused
   Return Value: -
  ******************************************************************************/
-void worker_cleanup(void *arg)
-{
-  static unsigned char first_run = 1;
+void worker_cleanup(void *arg) {
+    static unsigned char first_run = 1;
+    if (!first_run) {
+        DBG("already cleaned up resources\n");
+        return;
+    }
 
-  if (!first_run)
-  {
-    DBG("already cleaned up resources\n");
-    return;
-  }
+    first_run = 0;
+    DBG("cleaning up resources allocated by input thread\n");
 
-  first_run = 0;
-  DBG("cleaning up resources allocated by input thread\n");
-
-  if(pglobal->in[plugin_number].buf != NULL)
-    free(pglobal->in[plugin_number].buf);
+    if (pglobal->in[plugin_number].buf != NULL) {
+        free(pglobal->in[plugin_number].buf);
+    }
 }

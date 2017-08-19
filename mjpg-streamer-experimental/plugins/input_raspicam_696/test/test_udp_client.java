@@ -149,6 +149,8 @@ class Udp_Blob_List {
             in[0] != MSG_ID) {
             throw new Cant_Construct_From_Bytes("Udp_Blob: length= " + in_length + " msg_id= " + in[0]);
         }
+        blob_count = (in_length - OFFSET_OF_BLOB_STATS) / SIZE_OF_BLOB_STATS;
+        /*
         blob_count = ((0xff & (int)in[7]) << 24) |
                      ((0xff & (int)in[6]) << 16) |
                      ((0xff & (int)in[5]) << 8) |
@@ -156,6 +158,7 @@ class Udp_Blob_List {
         if (in_length < OFFSET_OF_BLOB_STATS + blob_count * SIZE_OF_BLOB_STATS) {
             throw new Cant_Construct_From_Bytes("Udp_Blob: length= " + in_length + " blob_count= " + blob_count);
         }
+        */
 
         client_msec = ((0xff & (long)in[15]) << 56) |
                       ((0xff & (long)in[14]) << 48) |
