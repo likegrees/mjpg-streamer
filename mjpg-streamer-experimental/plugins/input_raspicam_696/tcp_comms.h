@@ -48,29 +48,34 @@
  *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <stdbool.h>
+#include "mmal.h"
 #include "RaspiCamControl.h"
 
 typedef struct {
     int fd;
     struct sockaddr_storage saddr;
     socklen_t saddr_len;
-    pthread_t pthread_id;
 } Tcp_Host_Info;
 
 typedef struct {
-    Tcp_Host_Info server;
-    int client_count;
-    Tcp_Host_Info* client;
-    pthread_mutex_t lock_mutex;           /// mutual exclusion lock
-
-    // Camera state
-    MMAL_COMPONENT_T camera_ptr;
     RASPICAM_CAMERA_PARAMETERS cam_params;
-    bool test_image_enable;
-    unsigned char detect_yuv_min[3];
-    unsigned char detect_yuv_max[3];
+    bool test_img_enable;
+    bool yuv_write;
+    bool jpg_write;
+    bool detect_yuv;
+    unsigned char blob_yuv_min[3];
+    unsigned char blob_yuv_max[3];
+    pthread_mutex_t params_mutex;           /// mutual exclusion lock
+} Tcp_Params;
+
+typedef struct {
+    Tcp_Host_Info server;
+    MMAL_COMPONENT_T* camera_ptr;
+    Tcp_Params* params_ptr;
 } Tcp_Comms;
 
+#define RASPICAM_QUIT                    0
 #define RASPICAM_SATURATION              1
 #define RASPICAM_SHARPNESS               2
 #define RASPICAM_CONTRAST                3
@@ -90,10 +95,11 @@ typedef struct {
 #define RASPICAM_SHUTTER_SPEED          17
 #define RASPICAM_DRC                    18
 #define RASPICAM_STATS_PASS             19
-//#define RASPICAM_ANNOTATE               20
-//#define RASPICAM_STEREO_MODE            21
-#define RASPICAM_TEST_IMAGE_ENABLE      22
-#define RASPICAM_DETECT_YUV             23
+#define RASPICAM_TEST_IMAGE_ENABLE      20
+#define RASPICAM_YUV_WRITE_ENABLE       21
+#define RASPICAM_JPG_WRITE_ENABLE       22
+#define RASPICAM_DETECT_YUV_ENABLE      23
+#define RASPICAM_BLOB_YUV               24
 
 typedef struct {
     unsigned char tag;
@@ -117,5 +123,10 @@ typedef struct {
     float float3;
 } Raspicam_Float_Msg;
 
+
+int tcp_params_construct(Tcp_Params* tcp_params_ptr);
+
 int tcp_comms_construct(Tcp_Comms* comms_ptr,
+                        MMAL_COMPONENT_T* camera_ptr,
+                        Tcp_Params* tcp_params_ptr,
                         unsigned short port_number);

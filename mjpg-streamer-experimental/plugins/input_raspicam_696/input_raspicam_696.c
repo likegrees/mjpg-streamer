@@ -46,7 +46,9 @@
 #include "detect_color_blobs.h"
 #include "yuv_color_space_image.h"
 #include "udp_comms.h"
+#include "tcp_comms.h"
 #include "log_error.h"
+#include "get_usecs.h"
 
 #include "RaspiCamControl.c"
 
@@ -77,13 +79,9 @@ typedef struct {
 } Component_Pool;
 
 typedef struct {
-    bool detect_yuv;
-    bool yuv_write;
-    bool jpg_write;
-    int test_img_y_value;
     unsigned char* test_img;
-    unsigned char blob_yuv_min[3];
-    unsigned char blob_yuv_max[3];
+    unsigned char test_img_y_value;
+    Tcp_Params tcp_params;
     unsigned char yuv_meas[3];
     unsigned int frame_no;
     MMAL_POOL_T* pool_ptr;
@@ -96,22 +94,17 @@ typedef struct {
 } Splitter_Callback_Data;
 
 static init_splitter_callback_data(Splitter_Callback_Data* p) {
-    p->detect_yuv = false;
-    p->blob_yuv_min[0] = 0;
-    p->blob_yuv_min[1] = 0;
-    p->blob_yuv_min[2] = 0;
-    p->blob_yuv_max[0] = 0;
-    p->blob_yuv_max[1] = 0;
-    p->blob_yuv_max[2] = 0;
+    int status;
     p->frame_no = UINT_MAX; // encoder throws away 1st frame so we should too
     p->pool_ptr = NULL;
-    p->jpg_write = false;
-    p->yuv_write = false;
-    p->test_img_y_value = -1;
     p->test_img = NULL;
     p->yuv_fp = NULL;
     p->bbox_element_count = 0;
+    p->test_img_y_value = 128;
     pthread_mutex_init(&p->bbox_mutex, NULL);
+    if ((status = tcp_params_construct(&p->tcp_params)) != 0) {
+        LOG_ERROR("can't pthread_mutex_init(params_mutex) (%d)\n", status);
+    }
 }
 
 /* private functions and variables to this plugin */
@@ -133,8 +126,8 @@ static int quality = 85;
 static int usestills = 0;
 static int wantPreview = 0;
 static int wantTimestamp = 0;
-static RASPICAM_CAMERA_PARAMETERS c_params;
 static Splitter_Callback_Data splitter_callback_data;
+static Tcp_Comms tcp_comms;
 static MMAL_PARAMETER_CAMERA_SETTINGS_T settings;
 static Udp_Comms udp_comms;
 
@@ -219,22 +212,23 @@ void raspicamcontrol_log_parameters(int fps,
   Return Value: 0 if everything is ok
  ******************************************************************************/
 int input_init(input_parameter *param, int plugin_no) {
+    int status;
+    Tcp_Params* tcp_params_ptr = &splitter_callback_data.tcp_params;
 #ifdef DSC
     debug_fp = fopen("debug.txt", "w");
 #endif
     int i;
-    if (pthread_mutex_init(&controls_mutex, NULL) != 0) {
-        LOG_ERROR("could not initialize mutex variable\n");
+    if ((status = pthread_mutex_init(&controls_mutex, NULL)) != 0) {
+        LOG_ERROR("can't pthread_mutex_init(controls_mutex) (%d)\n", status);
         exit(EXIT_FAILURE);
     }
 
-    init_splitter_callback_data(&splitter_callback_data);
+    if (init_splitter_callback_data(&splitter_callback_data) < 0) {
+        exit(EXIT_FAILURE);
+    }
 
     param->argv[0] = INPUT_PLUGIN_NAME;
     plugin_number = plugin_no;
-
-    //setup the camera control st
-    raspicamcontrol_set_defaults(&c_params);
 
     /* show all parameters for DBG purposes */
     for (i = 0; i < param->argc; i++) {
@@ -324,66 +318,66 @@ int input_init(input_parameter *param, int plugin_no) {
             break;
         case 8:
             //sharpness
-            sscanf(optarg, "%d", &c_params.sharpness);
+            sscanf(optarg, "%d", &tcp_params_ptr->cam_params.sharpness);
             break;
         case 9:
             //contrast
-            sscanf(optarg, "%d", &c_params.contrast);
+            sscanf(optarg, "%d", &tcp_params_ptr->cam_params.contrast);
             break;
         case 10:
             //brightness
-            sscanf(optarg, "%d", &c_params.brightness);
+            sscanf(optarg, "%d", &tcp_params_ptr->cam_params.brightness);
             break;
         case 11:
             //saturation
-            sscanf(optarg, "%d", &c_params.saturation);
+            sscanf(optarg, "%d", &tcp_params_ptr->cam_params.saturation);
             break;
         case 12:
             //ISO
-            sscanf(optarg, "%d", &c_params.ISO);
+            sscanf(optarg, "%d", &tcp_params_ptr->cam_params.ISO);
             break;
         case 13:
             //video stabilisation
-            c_params.videoStabilisation = 1;
+            tcp_params_ptr->cam_params.videoStabilisation = 1;
             break;
         case 14:
             //ev
-            sscanf(optarg, "%d", &c_params.exposureCompensation);
+            sscanf(optarg, "%d", &tcp_params_ptr->cam_params.exposureCompensation);
             break;
         case 15:
             //exposure
-            c_params.exposureMode = exposure_mode_from_string(optarg);
+            tcp_params_ptr->cam_params.exposureMode = exposure_mode_from_string(optarg);
             break;
         case 16:
             //awb mode
-            c_params.awbMode = awb_mode_from_string(optarg);
+            tcp_params_ptr->cam_params.awbMode = awb_mode_from_string(optarg);
             break;
         case 17:
             //img effect
-            c_params.imageEffect = imagefx_mode_from_string(optarg);
+            tcp_params_ptr->cam_params.imageEffect = imagefx_mode_from_string(optarg);
             break;
         case 18:
             //color effects
             sscanf(optarg, "%d:%d",
-                   &c_params.colourEffects.u,
-                   &c_params.colourEffects.u);
-            c_params.colourEffects.enable = 1;
+                   &tcp_params_ptr->cam_params.colourEffects.u,
+                   &tcp_params_ptr->cam_params.colourEffects.u);
+            tcp_params_ptr->cam_params.colourEffects.enable = 1;
             break;
         case 19:
             //metering mode
-            c_params.exposureMeterMode = metering_mode_from_string(optarg);
+            tcp_params_ptr->cam_params.exposureMeterMode = metering_mode_from_string(optarg);
             break;
         case 20:
             //rotation
-            sscanf(optarg, "%d", &c_params.rotation);
+            sscanf(optarg, "%d", &tcp_params_ptr->cam_params.rotation);
             break;
         case 21:
             //hflip
-            c_params.hflip  = 1;
+            tcp_params_ptr->cam_params.hflip  = 1;
             break;
         case 22:
             //vflip
-            c_params.vflip = 1;
+            tcp_params_ptr->cam_params.vflip = 1;
             break;
         case 23:
             //quality
@@ -403,23 +397,23 @@ int input_init(input_parameter *param, int plugin_no) {
             break;
         case 27:
             // use stats
-            c_params.stats_pass = MMAL_TRUE;
+            tcp_params_ptr->cam_params.stats_pass = MMAL_TRUE;
             break;
         case 28:
             // Dynamic Range Compensation DRC
-            c_params.drc_level = drc_mode_from_string(optarg);
+            tcp_params_ptr->cam_params.drc_level = drc_mode_from_string(optarg);
             break;
         case 29:
             // shutter speed in microseconds
-            sscanf(optarg, "%d", &c_params.shutter_speed);
+            sscanf(optarg, "%d", &tcp_params_ptr->cam_params.shutter_speed);
             break;
         case 30:
             // awb gain red
-            sscanf(optarg, "%f", &c_params.awb_gains_r);
+            sscanf(optarg, "%f", &tcp_params_ptr->cam_params.awb_gains_r);
             break;
         case 31:
             // awb gain blue
-            sscanf(optarg, "%f", &c_params.awb_gains_b);
+            sscanf(optarg, "%f", &tcp_params_ptr->cam_params.awb_gains_b);
             break;
         case 32:
             // blobyuv
@@ -442,13 +436,13 @@ int input_init(input_parameter *param, int plugin_no) {
                 if (opt3 > 255) opt3 = 255;
                 if (opt4 > 255) opt4 = 255;
                 if (opt5 > 255) opt5 = 255;
-                splitter_callback_data.blob_yuv_min[0] = opt0;
-                splitter_callback_data.blob_yuv_max[0] = opt1;
-                splitter_callback_data.blob_yuv_min[1] = opt2;
-                splitter_callback_data.blob_yuv_max[1] = opt3;
-                splitter_callback_data.blob_yuv_min[2] = opt4;
-                splitter_callback_data.blob_yuv_max[2] = opt5;
-                splitter_callback_data.detect_yuv = true;
+                tcp_params_ptr->blob_yuv_min[0] = opt0;
+                tcp_params_ptr->blob_yuv_max[0] = opt1;
+                tcp_params_ptr->blob_yuv_min[1] = opt2;
+                tcp_params_ptr->blob_yuv_max[1] = opt3;
+                tcp_params_ptr->blob_yuv_min[2] = opt4;
+                tcp_params_ptr->blob_yuv_max[2] = opt5;
+                tcp_params_ptr->detect_yuv = true;
 #define MAX_RUNS 10000
 #define MAX_BLOBS 1000
                 splitter_callback_data.blob_list = blob_list_init(MAX_RUNS,
@@ -457,19 +451,21 @@ int input_init(input_parameter *param, int plugin_no) {
             break;
         case 33:
             //writeyuv
-            splitter_callback_data.yuv_write = true;
+            tcp_params_ptr->yuv_write = true;
             break;
         case 34:
             //writejpg
-            splitter_callback_data.jpg_write = true;
+            tcp_params_ptr->jpg_write = true;
             break;
         case 35:
-            sscanf(optarg, "%d", &splitter_callback_data.test_img_y_value);
-            if (splitter_callback_data.test_img_y_value > 255) {
-                splitter_callback_data.test_img_y_value = 255;
+            { //testimg
+                int test_img_y_value;
+                sscanf(optarg, "%d", &test_img_y_value);
+                if (test_img_y_value > 255) test_img_y_value = 255;
+                if (test_img_y_value < 0) test_img_y_value = 0;
+                splitter_callback_data.test_img_y_value = test_img_y_value;
+                break;
             }
-            //testimg
-            break;
             /* vwidth */
         case 36:
             vwidth = atoi(optarg);
@@ -497,7 +493,7 @@ int input_init(input_parameter *param, int plugin_no) {
     pglobal = param->global;
 
     raspicamcontrol_log_parameters(fps, width, height, vwidth, vheight,
-            &c_params);
+                                   &tcp_params_ptr->cam_params);
     return 0;
 }
 
@@ -566,35 +562,41 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
                                      MMAL_BUFFER_HEADER_T *buffer) {
     MMAL_BUFFER_HEADER_T *new_buffer;
     Splitter_Callback_Data *pData = (Splitter_Callback_Data*)port->userdata;
+    /*
     fprintf(stderr, "splitter: %u %lld %lld %lld len= %d (%d x %d)\n",
             pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(),
             buffer->length, port->format->es->video.width,
             port->format->es->video.height);
+    */
 
     if (pData != NULL) {
         unsigned char* img = buffer->data;
         mmal_buffer_header_mem_lock(buffer);
-        if (splitter_callback_data.test_img != NULL) {
-            img = splitter_callback_data.test_img;
+        pthread_mutex_lock(&pData->tcp_params.params_mutex);
+        if (pData->tcp_params.test_img_enable) {
+            img = pData->test_img;
         }
-        if (pData->detect_yuv) {
+        if (pData->tcp_params.detect_yuv) {
             unsigned int cols = port->format->es->video.width;
             unsigned int rows = port->format->es->video.height;
             int64_t now = get_cam_host_usec(&udp_comms);
             Udp_Blob_List udp_blob_list;
             yuv420_get_pixel(cols, rows, img, cols / 2, rows / 2,
-                    pData->yuv_meas);
-            detect_color_blobs(&pData->blob_list, pData->blob_yuv_min[0],
-                    pData->blob_yuv_min[1], pData->blob_yuv_max[1],
-                    pData->blob_yuv_min[2], pData->blob_yuv_max[2],
-                    false, cols, rows, img);
+                             pData->yuv_meas);
+            detect_color_blobs(&pData->blob_list,
+                               pData->tcp_params.blob_yuv_min[0],
+                               pData->tcp_params.blob_yuv_min[1],
+                               pData->tcp_params.blob_yuv_max[1],
+                               pData->tcp_params.blob_yuv_min[2],
+                               pData->tcp_params.blob_yuv_max[2],
+                               false, cols, rows, img);
 #define MIN_PIXELS_PER_BLOB 30
             (void)blob_list_purge_small_bboxes(&pData->blob_list,
-                    MIN_PIXELS_PER_BLOB);
+                                               MIN_PIXELS_PER_BLOB);
             pthread_mutex_lock(&pData->bbox_mutex);
             pData->bbox_element_count =
                 copy_best_bounding_boxes(&pData->blob_list, MAX_BBOXES * 4,
-                        pData->bbox_element);
+                                         pData->bbox_element);
             pthread_mutex_unlock(&pData->bbox_mutex);
             //printf("bbox_element_count= %d\n", pData->bbox_element_count);
             udp_blob_list.msg_id = ID_UDP_BLOB_LIST;
@@ -602,11 +604,12 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
             udp_blob_list.filler[1] = 0;
             udp_blob_list.filler[2] = 0;
             udp_blob_list.blob_count = copy_best_bboxes_to_blob_stats_array(
-                    &pData->blob_list,
-                    MAX_UDP_BLOBS,
-                    &udp_blob_list.blob[0]);
+                                                       &pData->blob_list,
+                                                       MAX_UDP_BLOBS,
+                                                       &udp_blob_list.blob[0]);
             (void)udp_comms_send_blobs_to_all(&udp_comms, now, &udp_blob_list);
         }
+        pthread_mutex_unlock(&pData->tcp_params.params_mutex);
         mmal_buffer_header_mem_unlock(buffer);
         if (pData->yuv_fp != NULL) {
             //fwrite(buffer->data, 1, buffer->length, pData->yuv_fp);
@@ -644,9 +647,11 @@ static void encoder_buffer_callback(MMAL_PORT_T *port,
 
     // We pass our file handle and other stuff in via the userdata field.
     PORT_USERDATA *pData = (PORT_USERDATA *)port->userdata;
+    /*
     fprintf(stderr, "encoder: %u %lld %lld %lld len= %d flags= %x\n",
             pData->frame_no, buffer->pts, buffer->dts, vcos_getmicrosecs64(),
             buffer->length, buffer->flags);
+    */
 
     if (pData) {
         if (buffer->length) {
@@ -1190,12 +1195,13 @@ void *worker_thread(void *arg) {
         exit(EXIT_FAILURE);
     }
 
+    usecs_init();
+
     /* Start udp_comms thread. */
 
 //#define DEFAULT_UDP_COMMS_CLIENT_NAME "127.0.0.1"
 #define DEFAULT_UDP_COMMS_CLIENT_NAME NULL
 #define DEFAULT_UDP_COMMS_CLIENT_PORT 10696
-#define USECS_PER_SECOND 1000000
 #define MAX_ROUND_TRIP_USECS (USECS_PER_SECOND / 8)
 #define CLOCK_SAMPLES 500
     udp_comms_construct(&udp_comms, DEFAULT_UDP_COMMS_CLIENT_NAME, 
@@ -1335,10 +1341,18 @@ void *worker_thread(void *arg) {
         mmal_port_parameter_set(camera->control, &cam_config.hdr);
     }
 
-    //Set camera parameters
 
-    if (raspicamcontrol_set_all_parameters(camera, &c_params)) {
+    //Set camera parameters
+    if (raspicamcontrol_set_all_parameters(
+                      camera, &splitter_callback_data.tcp_params.cam_params)) {
         LOG_ERROR("can't raspicamcontrol_set_all_parameters\n");
+        exit(EXIT_FAILURE);
+    }
+
+#define DEFAULT_TCP_COMMS_PORT 10696
+    if (tcp_comms_construct(&tcp_comms, camera,
+                            &splitter_callback_data.tcp_params,
+                            DEFAULT_TCP_COMMS_PORT)) {
         exit(EXIT_FAILURE);
     }
 
@@ -1540,70 +1554,48 @@ void *worker_thread(void *arg) {
         exit(EXIT_FAILURE);
     }
 
-    // Set up optional splitter component
+    // Set up splitter component
 
     status = MMAL_SUCCESS;
-    if (splitter_callback_data.detect_yuv ||
-        splitter_callback_data.yuv_fp != NULL) {
-        splitter_pair = create_splitter_component(camera);
-        if (splitter_pair.component_ptr == NULL) status = MMAL_ENOSYS;
-    }
+    splitter_pair = create_splitter_component(camera);
+    if (splitter_pair.component_ptr == NULL) status = MMAL_ENOSYS;
 
     if (status == MMAL_SUCCESS) {
         if (wantPreview) {
-            if (splitter_callback_data.detect_yuv ||
-                splitter_callback_data.yuv_fp != NULL) {
-                // Connect camera preview output to splitter input
+            // Connect camera preview output to splitter input
 
-                status = connect_ports(camera_preview_port,
-                                       splitter_pair.component_ptr->input[0],
-                                       &splitter_connection);
+            status = connect_ports(camera_preview_port,
+                                   splitter_pair.component_ptr->input[0],
+                                   &splitter_connection);
 
-                if (status != MMAL_SUCCESS) {
-                    LOG_ERROR(
+            if (status != MMAL_SUCCESS) {
+                LOG_ERROR(
                 "can't connect_ports(camera_preview, splitter_input) (%s)\n",
-                              log_mmal_status(status));
-                } else {
-                    // Connect splitter preview output to preview input
-
-                    status = connect_ports(
-                     splitter_pair.component_ptr->output[SPLITTER_PREVIEW_PORT],
-                                           preview_input_port,
-                                           &preview_connection);
-                    if (status != MMAL_SUCCESS) {
-                        LOG_ERROR(
-                "can't connect_ports(splitter_preview, preview_input) (%s)\n",
-                                log_mmal_status(status));
-                    }
-                }
+                          log_mmal_status(status));
             } else {
-                // Connect camera to preview
-                status = connect_ports(camera_preview_port, preview_input_port,
+                // Connect splitter preview output to preview input
+
+                status = connect_ports(
+                 splitter_pair.component_ptr->output[SPLITTER_PREVIEW_PORT],
+                                       preview_input_port,
                                        &preview_connection);
                 if (status != MMAL_SUCCESS) {
                     LOG_ERROR(
-                   "can't connect_ports(camera_preview, preview_input) (%s)\n",
-                              log_mmal_status(status));
+                "can't connect_ports(splitter_preview, preview_input) (%s)\n",
+                            log_mmal_status(status));
                 }
             }
         } else {
-            if (splitter_callback_data.detect_yuv ||
-                    splitter_callback_data.yuv_fp != NULL) {
-                // Connect camera to splitter
+            // Connect camera to splitter
 
-                status = connect_ports(camera_preview_port,
-                                       splitter_pair.component_ptr->input[0],
-                                       &splitter_connection);
+            status = connect_ports(camera_preview_port,
+                                   splitter_pair.component_ptr->input[0],
+                                   &splitter_connection);
 
-                if (status != MMAL_SUCCESS) {
-                    LOG_ERROR(
+            if (status != MMAL_SUCCESS) {
+                LOG_ERROR(
                   "can't connect_ports(camera_preview, splitter_input) (%s)\n",
-                              log_mmal_status(status));
-                }
-            } else {
-                // Camera preview port is not used.
-
-                status = MMAL_SUCCESS;
+                          log_mmal_status(status));
             }
         }
     } 
@@ -1631,20 +1623,22 @@ void *worker_thread(void *arg) {
                    splitter_pair.component_ptr->output[SPLITTER_CALLBACK_PORT];
         splitter_callback_port->userdata =
                    (struct MMAL_PORT_USERDATA_T *)&splitter_callback_data;
-        if (splitter_callback_data.yuv_write) {
+        if (splitter_callback_data.tcp_params.yuv_write) {
             char filename[32];
             snprintf(filename, 32, "out.yuv");
             splitter_callback_data.yuv_fp = fopen(filename, "wb");
             fprintf(splitter_callback_data.yuv_fp,
                     "#!YUV420 %7u,%7u\n", width, height);
         }
-        if (splitter_callback_data.test_img_y_value >= 0) {
-            splitter_callback_data.test_img = (unsigned char*)malloc(
+
+        /* Create the YUV test image. */
+
+        splitter_callback_data.test_img = (unsigned char*)malloc(
                                                        width * height * 3 / 2);
-            yuv_color_space_image(width, height,
-                                  splitter_callback_data.test_img_y_value,
-                                  splitter_callback_data.test_img);
-        }
+        yuv_color_space_image(width, height,
+                              splitter_callback_data.test_img_y_value,
+                              splitter_callback_data.test_img);
+
         status = mmal_port_enable(splitter_callback_port,
                                   splitter_buffer_callback);
         if (status != MMAL_SUCCESS) {

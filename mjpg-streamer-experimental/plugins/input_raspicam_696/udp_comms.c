@@ -71,7 +71,6 @@
 #define PICAM_PORT 9696
 
 #define MSECS_PER_SECOND 1000
-#define USECS_PER_SECOND 1000000
 
 /*
 static inline bool timeval_is_gt(struct timeval a,

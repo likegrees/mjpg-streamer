@@ -785,7 +785,6 @@ unsigned int copy_best_bounding_boxes(Blob_List* p,
     sort_blobs_by_pixel_count(p);
     for (i = 0; i < p->used_root_list_count; ++i) {
         Blob_Stats* s = &p->root_info[i].stats;
-        printf("pix_count= %u\n", s->count);
         bbox_element[k*4+0] = s->min_x;
         bbox_element[k*4+1] = s->min_y;
         bbox_element[k*4+2] = s->max_x;

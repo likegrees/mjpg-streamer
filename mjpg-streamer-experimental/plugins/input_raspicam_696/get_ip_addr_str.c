@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include "get_ip_addr_str.h"
