@@ -11,15 +11,15 @@ const char* get_ip_addr_str(const struct sockaddr* saddr,
     void* addr_ptr = NULL;
     unsigned short port = 0;
     switch (saddr->sa_family) {
-    case AF_INET:
-        family = AF_INET;
-        addr_ptr = &((struct sockaddr_in*)saddr)->sin_addr;
-        port = ntohs(((struct sockaddr_in*)saddr)->sin_port);
-        break;
     case AF_INET6:
         family = AF_INET6;
         addr_ptr = &((struct sockaddr_in6*)saddr)->sin6_addr;
         port = ntohs(((struct sockaddr_in6*)saddr)->sin6_port);
+        break;
+    case AF_INET:
+        family = AF_INET;
+        addr_ptr = &((struct sockaddr_in*)saddr)->sin_addr;
+        port = ntohs(((struct sockaddr_in*)saddr)->sin_port);
         break;
     }
 

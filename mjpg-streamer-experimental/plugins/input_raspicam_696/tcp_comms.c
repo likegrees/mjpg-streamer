@@ -52,6 +52,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <errno.h>
+#include <string.h>
 #include <sys/types.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -63,9 +64,9 @@
 #include "get_usecs.h"
 
 typedef struct {
-    Tcp_Params* params_ptr;
-    Tcp_Host_Info* client_ptr;
+    Tcp_Host_Info client;
     MMAL_COMPONENT_T* camera_ptr;
+    Tcp_Params* params_ptr;
 } Connection_Thread_Info;
 
 
@@ -77,6 +78,12 @@ static inline float_limit(float low, float high, float value) {
     return (value < low) ? low : (value > high) ? high : value;
 }
 
+static inline float ntohf(float in) {
+    uint32_t* p = (uint32_t*)&in;
+    uint32_t out = ntohl(*p);
+    return *(float*)&out;
+}
+
 static void* connection_thread(void* void_args_ptr) {
 #define INT1    8
 #define INT2   12
@@ -85,14 +92,17 @@ static void* connection_thread(void* void_args_ptr) {
 #define FLOAT2 12
 #define FLOAT4 24
 
-#define MAX_CLIENT_STRING 64
-    char client_string[MAX_CLIENT_STRING];
 #define MAX_MESG 64
     char mesg[MAX_MESG];
     Connection_Thread_Info* args_ptr = (Connection_Thread_Info*)void_args_ptr;
-    Tcp_Params* params_ptr = args_ptr->params_ptr;
-    Tcp_Host_Info* client_ptr = args_ptr->client_ptr;
+    Tcp_Host_Info* client_ptr = &args_ptr->client;
     MMAL_COMPONENT_T* camera_ptr = args_ptr->camera_ptr;
+    Tcp_Params* params_ptr = args_ptr->params_ptr;
+
+#define MAX_CLIENT_STRING 64
+    char client_string[MAX_CLIENT_STRING];
+    get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
+                     client_string, MAX_CLIENT_STRING);
 
     Raspicam_Char_Msg* char_msg_ptr = (Raspicam_Char_Msg*)mesg;
     Raspicam_Int_Msg* int_msg_ptr = (Raspicam_Int_Msg*)mesg;
@@ -105,11 +115,9 @@ static void* connection_thread(void* void_args_ptr) {
         switch (mesg[0]) {
         case RASPICAM_QUIT:
             LOG_STATUS("at %.3f, tcp client %s quit\n",
-                       get_ip_addr_str(
-                                    (const struct sockaddr*)&client_ptr->saddr,
-                                    client_string, MAX_CLIENT_STRING));
-            free(client_ptr);
-            return NULL;
+                       timestamp, client_string);
+            //free(args_ptr);
+            //return NULL;
         case RASPICAM_SATURATION:
             if (bytes < INT1) {
                 error_seen = true;
@@ -215,9 +223,9 @@ static void* connection_thread(void* void_args_ptr) {
                 error_seen = true;
             } else {
                 params_ptr->cam_params.awb_gains_r =
-                        float_limit(0.00001, 1.0, ntohl(float_msg_ptr->float0));
+                                                ntohf(float_msg_ptr->float0);
                 params_ptr->cam_params.awb_gains_b =
-                        float_limit(0.00001, 1.0, ntohl(float_msg_ptr->float1));
+                                                ntohf(float_msg_ptr->float1);
                 raspicamcontrol_set_awb_gains(
                                            camera_ptr,
                                            params_ptr->cam_params.awb_gains_r,
@@ -276,13 +284,13 @@ static void* connection_thread(void* void_args_ptr) {
                 error_seen = true;
             } else {
                 params_ptr->cam_params.roi.x =
-                           float_limit(0.0, 1.0, ntohl(float_msg_ptr->float0));
+                           float_limit(0.0, 1.0, ntohf(float_msg_ptr->float0));
                 params_ptr->cam_params.roi.y =
-                           float_limit(0.0, 1.0, ntohl(float_msg_ptr->float1));
+                           float_limit(0.0, 1.0, ntohf(float_msg_ptr->float1));
                 params_ptr->cam_params.roi.w =
-                           float_limit(0.0, 1.0, ntohl(float_msg_ptr->float2));
+                           float_limit(0.0, 1.0, ntohf(float_msg_ptr->float2));
                 params_ptr->cam_params.roi.h =
-                           float_limit(0.0, 1.0, ntohl(float_msg_ptr->float3));
+                           float_limit(0.0, 1.0, ntohf(float_msg_ptr->float3));
                 raspicamcontrol_set_ROI(camera_ptr, params_ptr->cam_params.roi);
             }
             break;
@@ -362,27 +370,26 @@ static void* connection_thread(void* void_args_ptr) {
             break;
         default:
             LOG_ERROR("at %.3f, unexpected tcp message tag %d from %s\n",
-                      timestamp, mesg[0],
-                      get_ip_addr_str(
-                                  (const struct sockaddr*)&client_ptr->saddr,
-                                  client_string, MAX_CLIENT_STRING));
+                      timestamp, mesg[0], client_string);
         }
         pthread_mutex_unlock(&params_ptr->params_mutex);
         if (error_seen) {
             LOG_ERROR(
                 "at %.3f, too few bytes (%d) in tcp message tag %d from %s\n",
-                      timestamp, bytes, mesg[0],
-                      get_ip_addr_str(
-                                  (const struct sockaddr*)&client_ptr->saddr,
-                                  client_string, MAX_CLIENT_STRING));
+                      timestamp, bytes, mesg[0], client_string);
         }
     }
-    LOG_ERROR("at %.3f, can't recv from tcp client %s; errno= %d\n",
-              get_usecs() / (float)USECS_PER_SECOND,
-              get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
-                              client_string, MAX_CLIENT_STRING),
-              errno);
-    free(client_ptr);
+    if (errno == ECONNRESET) {
+        LOG_ERROR("at %.3f, tcp client %s disconnected\n",
+                  get_usecs() / (float)USECS_PER_SECOND, client_string);
+    } else {
+#define MAX_ERR_MSG 128
+        char errmsg[MAX_ERR_MSG];
+        LOG_ERROR("at %.3f, can't recv from tcp client %s, errno= %d; %s\n",
+                  get_usecs() / (float)USECS_PER_SECOND, client_string,
+                  errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
+    }
+    free(args_ptr);
     return NULL;
 }
 
@@ -392,36 +399,50 @@ static void* connection_thread(void* void_args_ptr) {
 static void* server_thread(void* void_args_ptr) {
     Tcp_Comms* comms_ptr = (Tcp_Comms*)void_args_ptr;
     int socket_fd = comms_ptr->server.fd;
-    int client_fd;
     struct sockaddr_storage client_addr;
 
     socklen_t bytes = sizeof(client_addr);
 
     // We always keep around space for one unused client to work in.
 
-    Tcp_Host_Info* client_ptr = (Tcp_Host_Info*)malloc(sizeof(Tcp_Host_Info));
-    while ((client_ptr->fd = accept(socket_fd,
-                                    (struct sockaddr*)&client_ptr->saddr,
-                                    &client_ptr->saddr_len)) >= 0) {
+    Connection_Thread_Info* conn_args_ptr = (Connection_Thread_Info*)
+                                       malloc(sizeof(Connection_Thread_Info));
+    conn_args_ptr->client.saddr_len = sizeof(conn_args_ptr->client.saddr);
+    while ((conn_args_ptr->client.fd =
+                    accept(socket_fd,
+                           (struct sockaddr*)&conn_args_ptr->client.saddr,
+                           &conn_args_ptr->client.saddr_len)) >= 0) {
         pthread_t pthread_id;
+        float timestamp = get_usecs() / (float)USECS_PER_SECOND;
+        char client_string[MAX_CLIENT_STRING];
+        conn_args_ptr->params_ptr = comms_ptr->params_ptr;
+        conn_args_ptr->camera_ptr = comms_ptr->camera_ptr;
+        get_ip_addr_str((const struct sockaddr*)&conn_args_ptr->client.saddr,
+                        client_string, MAX_CLIENT_STRING);
+        LOG_STATUS("at %.3f, new tcp connection from %s\n",
+                   timestamp, client_string);
 
         // Start a new thread to handle all communications with the new client.
 
         int status = pthread_create(&pthread_id, NULL, connection_thread,
-                                    client_ptr);
+                                    conn_args_ptr);
         if (status != 0) {
             LOG_ERROR("at %.3f, tcp_comms can't pthread_create (%d)\n",
-                      get_usecs() / (float)USECS_PER_SECOND, status);
+                      timestamp, status);
             return NULL;
         }
 
         // Make space for a new (unused) client.
 
-        client_ptr = (Tcp_Host_Info*)malloc(sizeof(Tcp_Host_Info));
+        conn_args_ptr = (Connection_Thread_Info*)
+                                       malloc(sizeof(Connection_Thread_Info));
+        conn_args_ptr->client.saddr_len = sizeof(conn_args_ptr->client.saddr);
     }
-    free(client_ptr);
-    LOG_ERROR("at %.3f, tcp_comms can't accept; errno=%d\n",
-              get_usecs() / (float)USECS_PER_SECOND, errno);
+    free(conn_args_ptr);
+    char errmsg[MAX_ERR_MSG];
+    LOG_ERROR("at %.3f, tcp_comms can't accept, errno=%d; %s\n",
+              get_usecs() / (float)USECS_PER_SECOND, errno,
+              strerror_r(errno, errmsg, MAX_ERR_MSG));
     return NULL;
 }
 
@@ -446,9 +467,11 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
                         MMAL_COMPONENT_T* camera_ptr,
                         Tcp_Params* tcp_params_ptr,
                         unsigned short port_number) {
+    char errmsg[MAX_ERR_MSG];
     comms_ptr->server.fd = socket(AF_INET, SOCK_STREAM, 0);
     if (comms_ptr->server.fd < 0) {
-        LOG_ERROR("tcp_comms can't create socket; errno=%d\n", errno);
+        LOG_ERROR("tcp_comms can't create socket, errno=%d; %s\n",
+                  errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
         return -1;
     }
 
@@ -461,18 +484,21 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
 
     if (bind(comms_ptr->server.fd,
              (struct sockaddr*)saddr_ptr, comms_ptr->server.saddr_len) < 0) {
-        LOG_ERROR("tcp_comms can't bind; errno=%d\n", errno);
+        LOG_ERROR("tcp_comms can't bind, errno=%d; %s\n",
+                  errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
         return -1;
     }
 
     if (listen(comms_ptr->server.fd, 3) < 0) {
-        LOG_ERROR("tcp_comms can't listen; errno=%d\n", errno);
+        LOG_ERROR("tcp_comms can't listen, errno=%d; %s\n",
+                  errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
         return -1;
     }
 
     // Initialize shared fields of *comms_ptr.
 
     comms_ptr->camera_ptr = camera_ptr;
+    comms_ptr->params_ptr = tcp_params_ptr;
 
     // Start server_loop thread.
 
