@@ -1536,10 +1536,9 @@ void *worker_thread(void *arg) {
 
     status = mmal_component_enable(encoder);
     if (status) {
-        LOG_ERROR("can't set jpeg quality\n");
+        LOG_ERROR("can't enable encoder\n");
         mmal_component_destroy(camera);
-        if (encoder)
-            mmal_component_destroy(encoder);
+        if (encoder) mmal_component_destroy(encoder);
         exit(EXIT_FAILURE);
     }
     DBG("Encoder enabled, creating pool and connecting ports\n");

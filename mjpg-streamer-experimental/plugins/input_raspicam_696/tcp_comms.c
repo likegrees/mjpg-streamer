@@ -93,7 +93,7 @@ static void* connection_thread(void* void_args_ptr) {
 #define FLOAT4 24
 
 #define MAX_MESG 64
-    char mesg[MAX_MESG];
+    unsigned char mesg[MAX_MESG];
     Connection_Thread_Info* args_ptr = (Connection_Thread_Info*)void_args_ptr;
     Tcp_Host_Info* client_ptr = &args_ptr->client;
     MMAL_COMPONENT_T* camera_ptr = args_ptr->camera_ptr;
