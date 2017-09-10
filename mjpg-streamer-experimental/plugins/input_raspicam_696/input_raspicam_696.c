@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <math.h>
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
@@ -226,6 +227,11 @@ int input_init(input_parameter *param, int plugin_no) {
     if (init_splitter_callback_data(&splitter_callback_data) < 0) {
         exit(EXIT_FAILURE);
     }
+
+    // TEMPORARY
+    // TODO: check for digital gain also
+    //splitter_callback_data.tcp_params.analog_gain_target = 2.5;
+    //splitter_callback_data.tcp_params.analog_gain_tol = 0.1;
 
     param->argv[0] = INPUT_PLUGIN_NAME;
     plugin_number = plugin_no;
@@ -769,26 +775,73 @@ static void encoder_buffer_callback(MMAL_PORT_T *port,
     if (complete) vcos_semaphore_post(&(pData->complete_semaphore));
 }
 
+typedef struct {
+    MMAL_COMPONENT_T* camera_ptr;
+    Tcp_Params* tcp_params_ptr;
+    bool exposure_mode_is_on;
+} Camera_Control_Callback_Data;
+
+static void camera_control_callback_data_construct(
+                                 MMAL_COMPONENT_T* camera_ptr,
+                                 Tcp_Params* tcp_params_ptr,
+                                 Camera_Control_Callback_Data* data_ptr) {
+    data_ptr->camera_ptr = camera_ptr;
+    data_ptr->tcp_params_ptr = tcp_params_ptr;
+    data_ptr->exposure_mode_is_on =
+                        (tcp_params_ptr->cam_params.exposureMode !=
+                         MMAL_PARAM_EXPOSUREMODE_OFF);
+}
+
 
 /**
  * buffer header callback function for camera control
- *
- * No actions taken in current version
  *
  * @param port Pointer to port from which callback originated
  * @param buffer mmal buffer header pointer
  */
 static void camera_control_callback(MMAL_PORT_T *port,
-        MMAL_BUFFER_HEADER_T *buffer) {
+                                    MMAL_BUFFER_HEADER_T *buffer) {
     if (buffer->cmd == MMAL_EVENT_PARAMETER_CHANGED) {
 #define DSC1
 #ifdef DSC1
+        Camera_Control_Callback_Data *data_ptr =
+                                (Camera_Control_Callback_Data*)port->userdata;
         MMAL_EVENT_PARAMETER_CHANGED_T *param =
-            (MMAL_EVENT_PARAMETER_CHANGED_T *)buffer->data;
+                                (MMAL_EVENT_PARAMETER_CHANGED_T*)buffer->data;
         switch (param->hdr.id) {
             case MMAL_PARAMETER_CAMERA_SETTINGS: {
                  MMAL_PARAMETER_CAMERA_SETTINGS_T* sptr = &settings;
-                 *sptr = *(MMAL_PARAMETER_CAMERA_SETTINGS_T*)param;
+                *sptr = *(MMAL_PARAMETER_CAMERA_SETTINGS_T*)param;
+                pthread_mutex_lock(&data_ptr->tcp_params_ptr->params_mutex);
+                if (data_ptr->tcp_params_ptr->analog_gain_target > 0.0 &&
+                    data_ptr->tcp_params_ptr->cam_params.exposureMode !=
+                                              MMAL_PARAM_EXPOSUREMODE_OFF) {
+                    float analog_gain = settings.analog_gain.num /
+                                        (float)settings.analog_gain.den;
+                    float analog_gain_error =fabs(analog_gain -
+                             data_ptr->tcp_params_ptr->analog_gain_target);
+                    printf("analog_gain_error= %.3f (%.3f - %.3f) exp_mode %d\n", analog_gain_error, analog_gain, data_ptr->tcp_params_ptr->analog_gain_target, data_ptr->exposure_mode_is_on);
+                    if (analog_gain_error >
+                        data_ptr->tcp_params_ptr->analog_gain_tol) {
+                        if (!data_ptr->exposure_mode_is_on) {
+                            printf("set on\n");
+                            raspicamcontrol_set_exposure_mode(
+                                data_ptr->camera_ptr,
+                                data_ptr->tcp_params_ptr->cam_params.exposureMode);
+                            data_ptr->exposure_mode_is_on = true;
+                        }
+                    } else {
+                        if (data_ptr->exposure_mode_is_on) {
+                            printf("set off\n");
+                            raspicamcontrol_set_exposure_mode(
+                                              data_ptr->camera_ptr,
+                                              MMAL_PARAM_EXPOSUREMODE_OFF);
+                            data_ptr->exposure_mode_is_on = false;
+                        }
+                    }
+                }
+                pthread_mutex_unlock(&data_ptr->tcp_params_ptr->params_mutex);
+                     
                  /*
                     printf(
                     "Exposure now %u, analog gain %u/%u, digital gain %u/%u ",
@@ -1272,6 +1325,14 @@ void *worker_thread(void *arg) {
     // Enable camera control port
     // Enable the camera, and tell it its control callback function
 #ifdef DSC1
+    Camera_Control_Callback_Data camera_control_callback_data;
+    camera_control_callback_data_construct(
+                                 camera,
+                                 &splitter_callback_data.tcp_params,
+                                 &camera_control_callback_data);
+    camera->control->userdata =
+               (struct MMAL_PORT_USERDATA_T *)&camera_control_callback_data;
+
     MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T change_event_request =
                     { { MMAL_PARAMETER_CHANGE_EVENT_REQUEST,
                           sizeof(MMAL_PARAMETER_CHANGE_EVENT_REQUEST_T) },

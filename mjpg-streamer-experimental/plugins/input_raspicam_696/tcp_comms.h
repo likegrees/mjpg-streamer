@@ -66,6 +66,8 @@ typedef struct {
     bool detect_yuv;
     unsigned char blob_yuv_min[3];
     unsigned char blob_yuv_max[3];
+    float analog_gain_target;
+    float analog_gain_tol;
     pthread_mutex_t params_mutex;           /// mutual exclusion lock
 } Tcp_Params;
 

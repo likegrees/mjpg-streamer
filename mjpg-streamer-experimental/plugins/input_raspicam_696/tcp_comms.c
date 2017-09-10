@@ -460,6 +460,8 @@ int tcp_params_construct(Tcp_Params* params_ptr) {
     params_ptr->blob_yuv_max[0] = 0;
     params_ptr->blob_yuv_max[1] = 0;
     params_ptr->blob_yuv_max[2] = 0;
+    params_ptr->analog_gain_target = -1.0;
+    params_ptr->analog_gain_tol = 10.0;
     return 0;
 }
 
