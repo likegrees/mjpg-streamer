@@ -75,6 +75,7 @@ int overwrite_tif_tags(unsigned int width,
                        float awb_red_gain,
                        float awb_blue_gain,
                        const unsigned char yuv[3],
+                       MMAL_PARAM_EXPOSUREMODE_T exposure_mode_state,
                        unsigned char* buf) {
 
     /* Check the 1st four bytes to make sure this is a JPEG header. */
@@ -160,11 +161,11 @@ int overwrite_tif_tags(unsigned int width,
     byte[26] = 0x00;  // count of unsigned shorts in data (4 bytes)
     byte[27] = 0x00;
     byte[28] = 0x00;
-    byte[29] = 0x03;
+    byte[29] = 0x04;
     byte[30] = yuv[0];
     byte[31] = yuv[1];
     byte[32] = yuv[2];
-    byte[33] = 0x00;  // unused
+    byte[33] = (unsigned char)exposure_mode_state;
 
     // IFD 2: Gains
 

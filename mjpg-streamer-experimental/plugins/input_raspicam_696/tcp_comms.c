@@ -62,6 +62,7 @@
 #include "get_ip_addr_str.h"
 #include "mmal.h"
 #include "get_usecs.h"
+#include "mmal/mmal.h"
 
 typedef struct {
     Tcp_Host_Info client;
@@ -90,7 +91,7 @@ static void* connection_thread(void* void_args_ptr) {
 #define INT3   16
 #define FLOAT1  8
 #define FLOAT2 12
-#define FLOAT4 24
+#define FLOAT4 20
 
 #define MAX_MESG 64
     unsigned char mesg[MAX_MESG];
@@ -206,6 +207,8 @@ static void* connection_thread(void* void_args_ptr) {
                                     int_limit(0, 12, ntohl(int_msg_ptr->int0));
                 raspicamcontrol_set_exposure_mode(
                               camera_ptr, params_ptr->cam_params.exposureMode);
+                params_ptr->exposure_mode_state =
+                                          params_ptr->cam_params.exposureMode;
             }
             break;
         case RASPICAM_AWB_MODE:
@@ -368,6 +371,24 @@ static void* connection_thread(void* void_args_ptr) {
                 params_ptr->blob_yuv_max[2] = char_msg_ptr->c[5];
             }
             break;
+        case RASPICAM_FREEZE_EXPOSURE:
+            if (bytes < FLOAT4) {
+                error_seen = true;
+            } else {
+                float f0 = ntohf(float_msg_ptr->float0);
+                float f1 = ntohf(float_msg_ptr->float1);
+                float f2 = ntohf(float_msg_ptr->float2);
+                float f3 = ntohf(float_msg_ptr->float3);
+                params_ptr->analog_gain_target = f0;
+                params_ptr->analog_gain_tol = f1;
+                params_ptr->digital_gain_target = f2;
+                params_ptr->digital_gain_tol = f3;
+                raspicamcontrol_set_exposure_mode(
+                       camera_ptr, params_ptr->cam_params.exposureMode);
+                params_ptr->exposure_mode_state =
+                       params_ptr->cam_params.exposureMode;
+            }
+            break;
         default:
             LOG_ERROR("at %.3f, unexpected tcp message tag %d from %s\n",
                       timestamp, mesg[0], client_string);
@@ -462,6 +483,9 @@ int tcp_params_construct(Tcp_Params* params_ptr) {
     params_ptr->blob_yuv_max[2] = 0;
     params_ptr->analog_gain_target = -1.0;
     params_ptr->analog_gain_tol = 10.0;
+    params_ptr->digital_gain_target = -1.0;
+    params_ptr->digital_gain_tol = 10.0;
+    params_ptr->exposure_mode_state = MMAL_PARAM_EXPOSUREMODE_OFF;
     return 0;
 }
 

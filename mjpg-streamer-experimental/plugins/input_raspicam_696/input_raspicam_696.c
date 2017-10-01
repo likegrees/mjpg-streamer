@@ -96,16 +96,22 @@ typedef struct {
 
 static init_splitter_callback_data(Splitter_Callback_Data* p) {
     int status;
-    p->frame_no = UINT_MAX; // encoder throws away 1st frame so we should too
-    p->pool_ptr = NULL;
     p->test_img = NULL;
-    p->yuv_fp = NULL;
-    p->bbox_element_count = 0;
     p->test_img_y_value = 128;
-    pthread_mutex_init(&p->bbox_mutex, NULL);
     if ((status = tcp_params_construct(&p->tcp_params)) != 0) {
         LOG_ERROR("can't pthread_mutex_init(params_mutex) (%d)\n", status);
     }
+    p->yuv_meas[0] = 128;
+    p->yuv_meas[1] = 128;
+    p->yuv_meas[2] = 128;
+    p->frame_no = UINT_MAX; // encoder throws away 1st frame so we should too
+    p->pool_ptr = NULL;
+    p->yuv_fp = NULL;
+#define MAX_RUNS 10000
+#define MAX_BLOBS 1000
+    p->blob_list = blob_list_init(MAX_RUNS, MAX_BLOBS);
+    p->bbox_element_count = 0;
+    pthread_mutex_init(&p->bbox_mutex, NULL);
 }
 
 /* private functions and variables to this plugin */
@@ -283,6 +289,10 @@ int input_init(input_parameter *param, int plugin_no) {
             {"testimg", required_argument, 0, 0},           // 35
             {"vwidth", required_argument, 0, 0},            // 36
             {"vheight", required_argument, 0, 0},           // 37
+            {"againtarget", required_argument, 0, 0},       // 38
+            {"againtol", required_argument, 0, 0},          // 39
+            {"dgaintarget", required_argument, 0, 0},       // 40
+            {"dgaintol", required_argument, 0, 0},          // 41
             {0, 0, 0, 0}
         };
 
@@ -449,10 +459,6 @@ int input_init(input_parameter *param, int plugin_no) {
                 tcp_params_ptr->blob_yuv_min[2] = opt4;
                 tcp_params_ptr->blob_yuv_max[2] = opt5;
                 tcp_params_ptr->detect_yuv = true;
-#define MAX_RUNS 10000
-#define MAX_BLOBS 1000
-                splitter_callback_data.blob_list = blob_list_init(MAX_RUNS,
-                                                                  MAX_BLOBS);
             }
             break;
         case 33:
@@ -481,6 +487,22 @@ int input_init(input_parameter *param, int plugin_no) {
         case 37:
             vheight = atoi(optarg);
             vheight = VCOS_ALIGN_UP(vheight, 16); // DSC
+            break;
+        case 38:
+            //againtarget
+            sscanf(optarg, "%f", &tcp_params_ptr->analog_gain_target);
+            break;
+        case 39:
+            //againtol
+            sscanf(optarg, "%f", &tcp_params_ptr->analog_gain_tol);
+            break;
+        case 40:
+            //dgaintarget
+            sscanf(optarg, "%f", &tcp_params_ptr->digital_gain_target);
+            break;
+        case 41:
+            //dgaintol
+            sscanf(optarg, "%f", &tcp_params_ptr->digital_gain_tol);
             break;
         default:
             DBG("default case\n");
@@ -696,7 +718,9 @@ static void encoder_buffer_callback(MMAL_PORT_T *port,
                                              (float)settings.awb_red_gain.den,
                     settings.awb_blue_gain.num /
                                              (float)settings.awb_blue_gain.den,
-                    pData->splitter_data_ptr->yuv_meas, buffer->data);
+                    pData->splitter_data_ptr->yuv_meas,
+                    pData->splitter_data_ptr->tcp_params.exposure_mode_state,
+                    buffer->data);
                 pthread_mutex_unlock(&pData->splitter_data_ptr->bbox_mutex);
             }
 #endif
@@ -777,19 +801,17 @@ static void encoder_buffer_callback(MMAL_PORT_T *port,
 
 typedef struct {
     MMAL_COMPONENT_T* camera_ptr;
-    Tcp_Params* tcp_params_ptr;
-    bool exposure_mode_is_on;
+    Splitter_Callback_Data* splitter_data_ptr;
+    //Tcp_Params* tcp_params_ptr;
+    //bool exposure_mode_is_on;
 } Camera_Control_Callback_Data;
 
 static void camera_control_callback_data_construct(
                                  MMAL_COMPONENT_T* camera_ptr,
-                                 Tcp_Params* tcp_params_ptr,
+                                 Splitter_Callback_Data* splitter_data_ptr,
                                  Camera_Control_Callback_Data* data_ptr) {
     data_ptr->camera_ptr = camera_ptr;
-    data_ptr->tcp_params_ptr = tcp_params_ptr;
-    data_ptr->exposure_mode_is_on =
-                        (tcp_params_ptr->cam_params.exposureMode !=
-                         MMAL_PARAM_EXPOSUREMODE_OFF);
+    data_ptr->splitter_data_ptr = splitter_data_ptr;
 }
 
 
@@ -810,37 +832,65 @@ static void camera_control_callback(MMAL_PORT_T *port,
                                 (MMAL_EVENT_PARAMETER_CHANGED_T*)buffer->data;
         switch (param->hdr.id) {
             case MMAL_PARAMETER_CAMERA_SETTINGS: {
-                 MMAL_PARAMETER_CAMERA_SETTINGS_T* sptr = &settings;
+                Tcp_Params* tcp_params_ptr =
+                                 &data_ptr->splitter_data_ptr->tcp_params;
+                MMAL_PARAMETER_CAMERA_SETTINGS_T* sptr = &settings;
                 *sptr = *(MMAL_PARAMETER_CAMERA_SETTINGS_T*)param;
-                pthread_mutex_lock(&data_ptr->tcp_params_ptr->params_mutex);
-                if (data_ptr->tcp_params_ptr->analog_gain_target > 0.0 &&
-                    data_ptr->tcp_params_ptr->cam_params.exposureMode !=
+                pthread_mutex_lock(&tcp_params_ptr->params_mutex);
+
+                // If auto freeze exposure mode is turned on...
+
+                if ((tcp_params_ptr->analog_gain_target > 0.0 ||
+                     tcp_params_ptr->digital_gain_target > 0.0) &&
+                    tcp_params_ptr->cam_params.exposureMode !=
                                               MMAL_PARAM_EXPOSUREMODE_OFF) {
+                    // Measure current analog and digital gains.
+
                     float analog_gain = settings.analog_gain.num /
                                         (float)settings.analog_gain.den;
-                    float analog_gain_error =fabs(analog_gain -
-                             data_ptr->tcp_params_ptr->analog_gain_target);
-                    printf("analog_gain_error= %.3f (%.3f - %.3f) exp_mode %d\n", analog_gain_error, analog_gain, data_ptr->tcp_params_ptr->analog_gain_target, data_ptr->exposure_mode_is_on);
-                    if (analog_gain_error >
-                        data_ptr->tcp_params_ptr->analog_gain_tol) {
-                        if (!data_ptr->exposure_mode_is_on) {
+                    float analog_gain_error = fabs(analog_gain -
+                                         tcp_params_ptr->analog_gain_target);
+                    float digital_gain = settings.digital_gain.num /
+                                        (float)settings.digital_gain.den;
+                    float digital_gain_error = fabs(digital_gain -
+                                         tcp_params_ptr->digital_gain_target);
+                    bool analog_gain_is_wrong =
+                        tcp_params_ptr->analog_gain_target > 0.0 &&
+                        analog_gain_error > tcp_params_ptr->analog_gain_tol;
+                    bool digital_gain_is_wrong =
+                        tcp_params_ptr->digital_gain_target > 0.0 &&
+                        digital_gain_error > tcp_params_ptr->digital_gain_tol;
+                    if (analog_gain_is_wrong || digital_gain_is_wrong) {
+                        // One or both gain measurements are incorrect.
+
+                        if (tcp_params_ptr->exposure_mode_state ==
+                                                MMAL_PARAM_EXPOSUREMODE_OFF) {
+                            // Unfreeze exposure mode to allow gains to adjust.
+
                             printf("set on\n");
                             raspicamcontrol_set_exposure_mode(
                                 data_ptr->camera_ptr,
-                                data_ptr->tcp_params_ptr->cam_params.exposureMode);
-                            data_ptr->exposure_mode_is_on = true;
+                                tcp_params_ptr->cam_params.exposureMode);
+                            tcp_params_ptr->exposure_mode_state =
+                                    tcp_params_ptr->cam_params.exposureMode;
                         }
                     } else {
-                        if (data_ptr->exposure_mode_is_on) {
+                        // Analog and digital gain measurements are correct.
+
+                        if (tcp_params_ptr->exposure_mode_state !=
+                                                MMAL_PARAM_EXPOSUREMODE_OFF) {
+                            // Freeze the exposure mode.
+
                             printf("set off\n");
                             raspicamcontrol_set_exposure_mode(
                                               data_ptr->camera_ptr,
                                               MMAL_PARAM_EXPOSUREMODE_OFF);
-                            data_ptr->exposure_mode_is_on = false;
+                            tcp_params_ptr->exposure_mode_state =
+                                              MMAL_PARAM_EXPOSUREMODE_OFF;
                         }
                     }
                 }
-                pthread_mutex_unlock(&data_ptr->tcp_params_ptr->params_mutex);
+                pthread_mutex_unlock(&tcp_params_ptr->params_mutex);
                      
                  /*
                     printf(
@@ -1328,7 +1378,7 @@ void *worker_thread(void *arg) {
     Camera_Control_Callback_Data camera_control_callback_data;
     camera_control_callback_data_construct(
                                  camera,
-                                 &splitter_callback_data.tcp_params,
+                                 &splitter_callback_data,
                                  &camera_control_callback_data);
     camera->control->userdata =
                (struct MMAL_PORT_USERDATA_T *)&camera_control_callback_data;
@@ -1409,6 +1459,8 @@ void *worker_thread(void *arg) {
         LOG_ERROR("can't raspicamcontrol_set_all_parameters\n");
         exit(EXIT_FAILURE);
     }
+    splitter_callback_data.tcp_params.exposure_mode_state =
+                    splitter_callback_data.tcp_params.cam_params.exposureMode;
 
 #define DEFAULT_TCP_COMMS_PORT 10696
     if (tcp_comms_construct(&tcp_comms, camera,

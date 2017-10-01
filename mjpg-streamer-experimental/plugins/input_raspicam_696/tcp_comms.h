@@ -68,6 +68,9 @@ typedef struct {
     unsigned char blob_yuv_max[3];
     float analog_gain_target;
     float analog_gain_tol;
+    float digital_gain_target;
+    float digital_gain_tol;
+    MMAL_PARAM_EXPOSUREMODE_T exposure_mode_state;
     pthread_mutex_t params_mutex;           /// mutual exclusion lock
 } Tcp_Params;
 
@@ -102,6 +105,7 @@ typedef struct {
 #define RASPICAM_JPG_WRITE_ENABLE       22
 #define RASPICAM_DETECT_YUV_ENABLE      23
 #define RASPICAM_BLOB_YUV               24
+#define RASPICAM_FREEZE_EXPOSURE        25
 
 typedef struct {
     unsigned char tag;

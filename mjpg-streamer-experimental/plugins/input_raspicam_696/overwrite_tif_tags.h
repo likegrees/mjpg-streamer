@@ -47,6 +47,7 @@
  *     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#include "mmal/mmal.h"
 
 /**
  * @brief Overwrite the existing tiff headers with Team 696 bounding box
@@ -71,6 +72,9 @@
  * @param awb_blue_gain [in]    Camera auto white balance blue gain.
  * @param yuv [in]              A single YUV color value, usually from center
  *                              of image.
+ * @param exposure_mode_state [in]
+ *                              The current exposure mode state, which changes
+ *                              if auto freeze exposure mode is enabled.
  * @param buf [in,out]          Points to the start of the JPEG header.  The
  *                              size of the header is encoded in the header
  *                              itself.  This routine writes over the TIF tags
@@ -93,4 +97,5 @@ int overwrite_tif_tags(unsigned int width,
                        float awb_red_gain,
                        float awb_blue_gain,
                        const unsigned char yuv[3],
+                       MMAL_PARAM_EXPOSUREMODE_T exposure_mode_state,
                        unsigned char* buf);
