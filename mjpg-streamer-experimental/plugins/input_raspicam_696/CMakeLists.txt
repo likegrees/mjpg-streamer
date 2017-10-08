@@ -6,7 +6,7 @@ else()
 endif()
 
 
-MJPG_STREAMER_PLUGIN_OPTION(input_raspicam "Team 696 Raspberry Pi input camera plugin"
+MJPG_STREAMER_PLUGIN_OPTION(input_raspicam_696 "Team 696 Raspberry Pi input camera plugin"
                             ONLYIF HAS_RASPI)
 
 if (PLUGIN_INPUT_RASPICAM)

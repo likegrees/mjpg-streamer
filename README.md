@@ -16,6 +16,13 @@ perfomant M-JPEG streams even from an embedded device running OpenWRT. The
 input module "input_uvc.so" captures such JPG frames from a connected webcam.
 mjpg-streamer now supports a variety of different input devices.
 
+Team 696 Changes
+================
+Added the input_raspicam_696 plugin.
+Commented out "add_subdirectory(plugins/input_opencv)" line in CMakeLists.txt
+to avoid having to install opencv.  Uncomment this line if you want it.
+Added start_696.sh script.
+
 Security warning
 ----------------
 
