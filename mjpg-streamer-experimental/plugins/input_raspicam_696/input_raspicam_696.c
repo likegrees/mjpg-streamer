@@ -85,6 +85,8 @@ typedef struct {
     Tcp_Params tcp_params;
     unsigned char yuv_meas[3];
     unsigned int frame_no;
+    int vwidth;
+    int vheight;
     MMAL_POOL_T* pool_ptr;
     FILE* yuv_fp;
     Blob_List blob_list;
@@ -518,6 +520,11 @@ int input_init(input_parameter *param, int plugin_no) {
     if (width < 0) width = vwidth;
     if (height < 0) height = vheight;
 
+    tcp_params_ptr->crosshairs_x = vwidth / 2;
+    tcp_params_ptr->crosshairs_y = vheight / 2;
+    splitter_callback_data.vwidth = vwidth;
+    splitter_callback_data.vheight = vheight;
+
     pglobal = param->global;
 
     raspicamcontrol_log_parameters(fps, width, height, vwidth, vheight,
@@ -609,8 +616,22 @@ static void splitter_buffer_callback(MMAL_PORT_T *port,
             unsigned int rows = port->format->es->video.height;
             int64_t now = get_cam_host_usec(&udp_comms);
             Udp_Blob_List udp_blob_list;
-            yuv420_get_pixel(cols, rows, img, cols / 2, rows / 2,
-                             pData->yuv_meas);
+
+            /* Capture the YUV color value at the crosshairs.
+               (Crosshairs_x, crosshairs_y) is in video image coordinates.
+               Convert to camera image coordinates. */
+
+            int cam_x = pData->tcp_params.crosshairs_x * cols /
+                        pData->vwidth;
+            int cam_y = pData->tcp_params.crosshairs_y * rows /
+                        pData->vheight;
+
+            if (cam_x < 0 || cam_x >= cols ||
+                cam_y < 0 || cam_y  >= rows) {
+                cam_x = cols / 2;
+                cam_y  = rows / 2;
+            }
+            yuv420_get_pixel(cols, rows, img, cam_x, cam_y, pData->yuv_meas);
             detect_color_blobs(&pData->blob_list,
                                pData->tcp_params.blob_yuv_min[0],
                                pData->tcp_params.blob_yuv_min[1],
@@ -867,7 +888,7 @@ static void camera_control_callback(MMAL_PORT_T *port,
                                                 MMAL_PARAM_EXPOSUREMODE_OFF) {
                             // Unfreeze exposure mode to allow gains to adjust.
 
-                            printf("set on\n");
+                            printf("unfreeze exposure mode\n");
                             raspicamcontrol_set_exposure_mode(
                                 data_ptr->camera_ptr,
                                 tcp_params_ptr->cam_params.exposureMode);
@@ -881,7 +902,7 @@ static void camera_control_callback(MMAL_PORT_T *port,
                                                 MMAL_PARAM_EXPOSUREMODE_OFF) {
                             // Freeze the exposure mode.
 
-                            printf("set off\n");
+                            printf("freeze exposure mode\n");
                             raspicamcontrol_set_exposure_mode(
                                               data_ptr->camera_ptr,
                                               MMAL_PARAM_EXPOSUREMODE_OFF);

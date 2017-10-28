@@ -389,6 +389,14 @@ static void* connection_thread(void* void_args_ptr) {
                        params_ptr->cam_params.exposureMode;
             }
             break;
+        case RASPICAM_CROSSHAIRS:
+            if (bytes < INT2) {
+                error_seen = true;
+            } else {
+                params_ptr->crosshairs_x = ntohl(int_msg_ptr->int0);
+                params_ptr->crosshairs_y = ntohl(int_msg_ptr->int1);
+            }
+            break;
         default:
             LOG_ERROR("at %.3f, unexpected tcp message tag %d from %s\n",
                       timestamp, mesg[0], client_string);

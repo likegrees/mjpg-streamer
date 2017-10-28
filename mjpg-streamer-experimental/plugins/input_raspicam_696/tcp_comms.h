@@ -70,6 +70,8 @@ typedef struct {
     float analog_gain_tol;
     float digital_gain_target;
     float digital_gain_tol;
+    int crosshairs_x;
+    int crosshairs_y;
     MMAL_PARAM_EXPOSUREMODE_T exposure_mode_state;
     pthread_mutex_t params_mutex;           /// mutual exclusion lock
 } Tcp_Params;
@@ -106,6 +108,7 @@ typedef struct {
 #define RASPICAM_DETECT_YUV_ENABLE      23
 #define RASPICAM_BLOB_YUV               24
 #define RASPICAM_FREEZE_EXPOSURE        25
+#define RASPICAM_CROSSHAIRS             26
 
 typedef struct {
     unsigned char tag;
