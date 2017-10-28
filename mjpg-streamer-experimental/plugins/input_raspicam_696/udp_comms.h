@@ -88,15 +88,19 @@ typedef struct {
  * remote host clock will say by looking at our clock.
  */
 typedef struct {
-    struct sockaddr_storage saddr;      /// remote host internet address
-    socklen_t saddr_len;                /// bytes of used portion of saddr
-    int64_t client_start_time_msec;     /// start time on remote host clock
+    struct sockaddr_storage saddr;     /// remote host internet address
+    socklen_t saddr_len;               /// bytes of used portion of saddr
+    int64_t client_start_time_msec;    /// start time on remote host clock
     /* estimate of offset between our clock and theirs */
     int64_t min_offset_usec;
-    int64_t mean_half_round_trip_usec;  /// mean message one way trip time
-    int sample_count;                   /// number of time samples collected
-    int failed_sends;                   /// number of send failures
-    int log_next_at;
+    int64_t sum_half_round_trip_usec;  /// sum of message one way trip times
+    int64_t mean_half_round_trip_usec; /// mean message one way trip time
+    int64_t last_ping_usec;            /// time of most recent arrived msg
+    int sample_count;                  /// number of time samples collected
+    int failed_sends;                  /// number of send failures
+    int failed_pings;                  /// number of send failures
+    int log_next_at;                   /// number of failed sends between logs
+    bool is_disconnected;
 } Client_Info;
 
 /**
@@ -182,6 +186,12 @@ ssize_t udp_comms_send_blobs_to_all(Udp_Comms* comms_ptr,
  * Return the number of clients we are connected to.
  */
 int udp_comms_connection_count(Udp_Comms* comms_ptr);
+
+/**
+ * Return the age (in usecs) of the oldest ping response of all the connected
+ * clients.
+ */
+int64_t udp_comms_age_of_oldest_ping_response(Udp_Comms* comms_ptr);
 
 /**
  * Convert camera host usecs to client msecs.

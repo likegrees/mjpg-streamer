@@ -72,15 +72,6 @@
 
 #define MSECS_PER_SECOND 1000
 
-/*
-static inline bool timeval_is_gt(struct timeval a,
-                                 struct timeval b) {
-    if (a.tv_sec > b.tv_sec) return true;
-    if (a.tv_sec < b.tv_sec) return false;
-    if (a.tv_usec > b.tv_usec) return true;
-    return false;
-}
-*/
 
 static inline int64_t timeval_diff_usecs(struct timeval a,
                                          struct timeval b) {
@@ -175,10 +166,14 @@ static int lookup_client_info(Udp_Comms* comms_ptr,
     p->saddr_len = addr_len;
     p->client_start_time_msec = INT64_MIN;
     p->min_offset_usec = INT64_MAX;
+    p->sum_half_round_trip_usec = 0;
     p->mean_half_round_trip_usec = 0;
+    p->last_ping_usec = 0;
     p->sample_count = 0;
     p->failed_sends = 0;
+    p->failed_pings = 0;
     p->log_next_at = 1;
+    p->is_disconnected = false;
     pthread_mutex_lock(&comms_ptr->lock_mutex);
     ++comms_ptr->client_count;
     pthread_mutex_unlock(&comms_ptr->lock_mutex);
@@ -201,6 +196,7 @@ ssize_t udp_comms_send(Udp_Comms* comms_ptr,
                     client_ptr->saddr_len);
     pthread_mutex_unlock(&comms_ptr->lock_mutex);
     if (retval < 0) {
+        client_ptr->is_disconnected = true;
         ++client_ptr->failed_sends;
         if (client_ptr->failed_sends == client_ptr->log_next_at) {
             char ip_addr_str[INET6_ADDRSTRLEN+20];
@@ -221,6 +217,9 @@ ssize_t udp_comms_send(Udp_Comms* comms_ptr,
                      ip_addr_str, errno)
             client_ptr->log_next_at *= 10;
         }
+    } else {
+        client_ptr->is_disconnected = false;
+        client_ptr->log_next_at = 1;
     }
     return retval;
 }
@@ -263,6 +262,7 @@ static int handle_echo_time(Udp_Comms* comms_ptr,
     Client_Info* client_ptr = &comms_ptr->client[client_no];
     int64_t round_trip_usecs = arrive_usec - msg_in_ptr->cam_host_usec;
     if (round_trip_usecs < 0) return -1;
+    client_ptr->last_ping_usec = arrive_usec;
     if (client_ptr->client_start_time_msec == INT64_MIN) {
         client_ptr->client_start_time_msec = msg_in_ptr->client_msec;
     }
@@ -275,38 +275,42 @@ static int handle_echo_time(Udp_Comms* comms_ptr,
         if (offset < client_ptr->min_offset_usec) {
             client_ptr->min_offset_usec = offset;
         }
-        client_ptr->mean_half_round_trip_usec += round_trip_usecs;
+        client_ptr->sum_half_round_trip_usec += round_trip_usecs;
         ++client_ptr->sample_count;
-        if (client_ptr->sample_count == max_samples) {
-            client_ptr->mean_half_round_trip_usec /=
-                (client_ptr->sample_count * 2);
+        if (client_ptr->sample_count >= max_samples) {
+            client_ptr->mean_half_round_trip_usec =
+                                        client_ptr->sum_half_round_trip_usec /
+                                        (client_ptr->sample_count * 2);
+            if (client_ptr->sample_count == max_samples) {
 #ifdef OLD
-            struct timeval now;
-            gettimeofday(&now, NULL);
-            int64_t cam_host_usec = timeval_diff_usecs(now,
-                                                       comms_ptr->start_time);
+                struct timeval now;
+                gettimeofday(&now, NULL);
+                int64_t cam_host_usec = timeval_diff_usecs(
+                                                   now, comms_ptr->start_time);
 #else
-            int64_t cam_host_usec = get_usecs();
+                int64_t cam_host_usec = get_usecs();
 #endif
-            int64_t client_msec = to_client_msecs(client_ptr, cam_host_usec);
+                int64_t client_msec = to_client_msecs(client_ptr,
+                                                      cam_host_usec);
 
 
 #define MAX_ERRMSG 128
-            char errmsg[MAX_ERRMSG];
-            LOG_STATUS(
+                char errmsg[MAX_ERRMSG];
+                LOG_STATUS(
 "at %.3f, clock synched with client_no %d %s; client_secs= %.3f one-way= %lld usecs\n",
-                     cam_host_usec / (float)USECS_PER_SECOND, client_no,
-                     get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
-                                     errmsg, MAX_ERRMSG),
-                     client_msec / (float)MSECS_PER_SECOND,
-                     client_ptr->mean_half_round_trip_usec);
+                    cam_host_usec / (float)USECS_PER_SECOND, client_no,
+                    get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
+                                    errmsg, MAX_ERRMSG),
+                    client_msec / (float)MSECS_PER_SECOND,
+                    client_ptr->mean_half_round_trip_usec);
 
-            /* Tell any waiting task that a connection has been
-               established. */
+                /* Tell any waiting task that a connection has been
+                   established. */
 
-            pthread_mutex_lock(&comms_ptr->lock_mutex);
-            pthread_cond_signal(&comms_ptr->cond_have_connection);
-            pthread_mutex_unlock(&comms_ptr->lock_mutex);
+                pthread_mutex_lock(&comms_ptr->lock_mutex);
+                pthread_cond_signal(&comms_ptr->cond_have_connection);
+                pthread_mutex_unlock(&comms_ptr->lock_mutex);
+            }
         }
     }
     if (client_ptr->sample_count < max_samples) {
@@ -324,7 +328,6 @@ static int message_loop(Udp_Comms* comms_ptr,
                         int default_port_number,
                         int max_samples,
                         int64_t max_round_trip_usecs) {
-    bool have_connection = false;
     int ret_val = -1;
 
     // Initialize remaining fields of *comms_ptr.
@@ -411,9 +414,7 @@ static int message_loop(Udp_Comms* comms_ptr,
                       timestamp, errno);
             break;
         } else if (status == 0) {
-            /* Timeout.  No one's talking.  Resend Request_Time to any client
-               for which we have not yet collected enough Echo_Time
-               messages. */
+            /* Timeout.  No one's talking.  Send Request_Time to all clients. */
 
             int j;
             for (j = 0; j < comms_ptr->client_count; ++j) {
@@ -424,10 +425,8 @@ static int message_loop(Udp_Comms* comms_ptr,
                     LOG_ERROR(
              "at %.3f, clock sync with client_no %d %s timeout; resending\n",
                               timestamp, j, ip_addr_str);
-                    if (send_request_time(comms_ptr, j) < 0) {
-                        if (!have_connection) goto quit;
-                    }
                 }
+                (void)send_request_time(comms_ptr, j);
             }
         } else if (status == 1) {
             /* A message is ready to read. */
@@ -571,7 +570,8 @@ int udp_comms_connection_count_no_mutex(Udp_Comms* comms_ptr) {
     int connection_count = 0;
     int ii;
     for (ii = 0; ii < comms_ptr->client_count; ++ii) {
-        if (comms_ptr->client[ii].sample_count > 0) {
+        if (!comms_ptr->client[ii].is_disconnected &&
+            comms_ptr->client[ii].sample_count > 0) {
             ++connection_count;
         }
     }
@@ -588,6 +588,29 @@ int udp_comms_connection_count(Udp_Comms* comms_ptr) {
     pthread_mutex_unlock(&comms_ptr->lock_mutex);
     return connection_count;
 }
+
+
+/**
+ * Return the age (in usecs) of the oldest ping response of all the connected
+ * clients.
+ */
+int64_t udp_comms_age_of_oldest_ping_response(Udp_Comms* comms_ptr) {
+    pthread_mutex_lock(&comms_ptr->lock_mutex);
+    int64_t oldest = INT64_MAX;
+    int ii;
+    for (ii = 0; ii < comms_ptr->client_count; ++ii) {
+        if (!comms_ptr->client[ii].is_disconnected &&
+            comms_ptr->client[ii].last_ping_usec < oldest) {
+            oldest = comms_ptr->client[ii].last_ping_usec;
+        }
+    }
+    pthread_mutex_unlock(&comms_ptr->lock_mutex);
+    int64_t now = get_usecs();
+    int64_t age = now - oldest;
+    if (age < 0) age = 0;
+    return age;
+}
+
 
 int udp_comms_construct(Udp_Comms* comms_ptr,
                         const char* default_hostname,

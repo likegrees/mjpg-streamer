@@ -64,6 +64,7 @@ typedef struct {
     bool yuv_write;
     bool jpg_write;
     bool detect_yuv;
+    bool exposure_mode_is_frozen;
     unsigned char blob_yuv_min[3];
     unsigned char blob_yuv_max[3];
     float analog_gain_target;
@@ -72,7 +73,6 @@ typedef struct {
     float digital_gain_tol;
     int crosshairs_x;
     int crosshairs_y;
-    MMAL_PARAM_EXPOSUREMODE_T exposure_mode_state;
     pthread_mutex_t params_mutex;           /// mutual exclusion lock
 } Tcp_Params;
 

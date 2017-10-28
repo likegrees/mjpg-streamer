@@ -72,9 +72,10 @@
  * @param awb_blue_gain [in]    Camera auto white balance blue gain.
  * @param yuv [in]              A single YUV color value, usually from center
  *                              of image.
- * @param exposure_mode_state [in]
- *                              The current exposure mode state, which changes
- *                              if auto freeze exposure mode is enabled.
+ * @param flags [in]            Bit flags.  Used to specify the status of
+ *                              exposure mode freeze, udp connection status,
+ *                              etc.  This routine is agnotic to the meanings
+ *                              of these flags.
  * @param buf [in,out]          Points to the start of the JPEG header.  The
  *                              size of the header is encoded in the header
  *                              itself.  This routine writes over the TIF tags
@@ -97,5 +98,5 @@ int overwrite_tif_tags(unsigned int width,
                        float awb_red_gain,
                        float awb_blue_gain,
                        const unsigned char yuv[3],
-                       MMAL_PARAM_EXPOSUREMODE_T exposure_mode_state,
+                       unsigned char flags,
                        unsigned char* buf);

@@ -9,7 +9,7 @@ class Cant_Construct_From_Bytes extends Exception {
 
 
 /**
- * A message sent to request the other side send its timestamp.
+ * A message sent to me to request my current timestamp.
  */
 class Request_Time {
     public static final byte LENGTH = 16;
@@ -64,7 +64,7 @@ class Request_Time {
 
 
 /**
- * A message sent in response to Request_Time.  Echoes my current time back to
+ * A message I send in response to Request_Time.  Echoes my current time back to
  * the requestor.
  */
 class Echo_Time {
@@ -115,6 +115,9 @@ class Echo_Time {
     }
 }
 
+/**
+ * Describes a single color blob.
+ */
 class Blob_Stats {
     public short min_x;
     public short max_x;
@@ -137,7 +140,7 @@ class Udp_Blob_List {
     public Blob_Stats[] blob;
 
     /**
-     * Construct a Udp_Blob object from a byte stream, most likely sent
+     * Construct a Udp_Blob_List object from a byte stream, most likely sent
      * as a UDP message.
      */
     public Udp_Blob_List(int in_length, byte [] in)
@@ -255,10 +258,8 @@ class TestUDPClient
                                            " port " + port);
                         connected = true;
                     }
-                    /*
                     System.out.println("saw " + msg_in.cam_host_usec +
                                        " sent " + now);
-                    */
                 } else if (msg_id == Udp_Blob_List.MSG_ID) {
                     int ii;
                     Udp_Blob_List msg_in = new Udp_Blob_List(

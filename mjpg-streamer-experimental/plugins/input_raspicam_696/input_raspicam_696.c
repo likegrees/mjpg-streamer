@@ -727,6 +727,16 @@ static void encoder_buffer_callback(MMAL_PORT_T *port,
                 unsigned int total_header_bytes = SIZE_FIELD_OFFSET +
                     (((unsigned int)buffer->data[4] << 8) | buffer->data[5]);
                 const unsigned int TIFF_TAGS_OFFSET = 12;
+                int udp_comms_connections =
+                            udp_comms_connection_count(&udp_comms);
+                int64_t udp_comms_ping_age =
+                            udp_comms_age_of_oldest_ping_response(&udp_comms);
+                uint8_t flag0 =
+                  pData->splitter_data_ptr->tcp_params.exposure_mode_is_frozen;
+                uint8_t flag1 = (udp_comms_connections > 0);
+                uint8_t flag2 = (udp_comms_ping_age > 2 * USECS_PER_SECOND);
+                uint8_t flags = flag2 << 2 | flag1 << 1 | flag0;
+
                 pthread_mutex_lock(&pData->splitter_data_ptr->bbox_mutex);
                 overwrite_tif_tags(
                     pData->width, pData->height, pData->vwidth, pData->vheight,
@@ -740,8 +750,7 @@ static void encoder_buffer_callback(MMAL_PORT_T *port,
                     settings.awb_blue_gain.num /
                                              (float)settings.awb_blue_gain.den,
                     pData->splitter_data_ptr->yuv_meas,
-                    pData->splitter_data_ptr->tcp_params.exposure_mode_state,
-                    buffer->data);
+                    flags, buffer->data);
                 pthread_mutex_unlock(&pData->splitter_data_ptr->bbox_mutex);
             }
 #endif
@@ -823,8 +832,6 @@ static void encoder_buffer_callback(MMAL_PORT_T *port,
 typedef struct {
     MMAL_COMPONENT_T* camera_ptr;
     Splitter_Callback_Data* splitter_data_ptr;
-    //Tcp_Params* tcp_params_ptr;
-    //bool exposure_mode_is_on;
 } Camera_Control_Callback_Data;
 
 static void camera_control_callback_data_construct(
@@ -884,30 +891,26 @@ static void camera_control_callback(MMAL_PORT_T *port,
                     if (analog_gain_is_wrong || digital_gain_is_wrong) {
                         // One or both gain measurements are incorrect.
 
-                        if (tcp_params_ptr->exposure_mode_state ==
-                                                MMAL_PARAM_EXPOSUREMODE_OFF) {
+                        if (tcp_params_ptr->exposure_mode_is_frozen) {
                             // Unfreeze exposure mode to allow gains to adjust.
 
                             printf("unfreeze exposure mode\n");
                             raspicamcontrol_set_exposure_mode(
                                 data_ptr->camera_ptr,
                                 tcp_params_ptr->cam_params.exposureMode);
-                            tcp_params_ptr->exposure_mode_state =
-                                    tcp_params_ptr->cam_params.exposureMode;
+                            tcp_params_ptr->exposure_mode_is_frozen = false;
                         }
                     } else {
                         // Analog and digital gain measurements are correct.
 
-                        if (tcp_params_ptr->exposure_mode_state !=
-                                                MMAL_PARAM_EXPOSUREMODE_OFF) {
+                        if (!tcp_params_ptr->exposure_mode_is_frozen) {
                             // Freeze the exposure mode.
 
                             printf("freeze exposure mode\n");
                             raspicamcontrol_set_exposure_mode(
                                               data_ptr->camera_ptr,
                                               MMAL_PARAM_EXPOSUREMODE_OFF);
-                            tcp_params_ptr->exposure_mode_state =
-                                              MMAL_PARAM_EXPOSUREMODE_OFF;
+                            tcp_params_ptr->exposure_mode_is_frozen = true;
                         }
                     }
                 }
@@ -1480,8 +1483,6 @@ void *worker_thread(void *arg) {
         LOG_ERROR("can't raspicamcontrol_set_all_parameters\n");
         exit(EXIT_FAILURE);
     }
-    splitter_callback_data.tcp_params.exposure_mode_state =
-                    splitter_callback_data.tcp_params.cam_params.exposureMode;
 
 #define DEFAULT_TCP_COMMS_PORT 10696
     if (tcp_comms_construct(&tcp_comms, camera,

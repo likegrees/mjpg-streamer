@@ -207,8 +207,6 @@ static void* connection_thread(void* void_args_ptr) {
                                     int_limit(0, 12, ntohl(int_msg_ptr->int0));
                 raspicamcontrol_set_exposure_mode(
                               camera_ptr, params_ptr->cam_params.exposureMode);
-                params_ptr->exposure_mode_state =
-                                          params_ptr->cam_params.exposureMode;
             }
             break;
         case RASPICAM_AWB_MODE:
@@ -385,8 +383,6 @@ static void* connection_thread(void* void_args_ptr) {
                 params_ptr->digital_gain_tol = f3;
                 raspicamcontrol_set_exposure_mode(
                        camera_ptr, params_ptr->cam_params.exposureMode);
-                params_ptr->exposure_mode_state =
-                       params_ptr->cam_params.exposureMode;
             }
             break;
         case RASPICAM_CROSSHAIRS:
@@ -493,7 +489,7 @@ int tcp_params_construct(Tcp_Params* params_ptr) {
     params_ptr->analog_gain_tol = 10.0;
     params_ptr->digital_gain_target = -1.0;
     params_ptr->digital_gain_tol = 10.0;
-    params_ptr->exposure_mode_state = MMAL_PARAM_EXPOSUREMODE_OFF;
+    params_ptr->exposure_mode_is_frozen = false;
     return 0;
 }
 
