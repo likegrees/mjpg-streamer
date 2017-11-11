@@ -49,6 +49,8 @@
  */
 
 #include <stdbool.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include "mmal.h"
 #include "RaspiCamControl.h"
 
@@ -64,7 +66,6 @@ typedef struct {
     bool yuv_write;
     bool jpg_write;
     bool detect_yuv;
-    bool exposure_mode_is_frozen;
     unsigned char blob_yuv_min[3];
     unsigned char blob_yuv_max[3];
     float analog_gain_target;

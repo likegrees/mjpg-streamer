@@ -21,15 +21,12 @@
  *******************************************************************************/
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <unistd.h>
 #include <math.h>
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
-#include <sys/socket.h>
 #include <arpa/inet.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <getopt.h>
 #include <pthread.h>
@@ -83,6 +80,7 @@ typedef struct {
     unsigned char* test_img;
     unsigned char test_img_y_value;
     Tcp_Params tcp_params;
+    bool exposure_mode_is_frozen;
     unsigned char yuv_meas[3];
     unsigned int frame_no;
     int vwidth;
@@ -103,6 +101,7 @@ static init_splitter_callback_data(Splitter_Callback_Data* p) {
     if ((status = tcp_params_construct(&p->tcp_params)) != 0) {
         LOG_ERROR("can't pthread_mutex_init(params_mutex) (%d)\n", status);
     }
+    p->exposure_mode_is_frozen = false;
     p->yuv_meas[0] = 128;
     p->yuv_meas[1] = 128;
     p->yuv_meas[2] = 128;
@@ -428,10 +427,12 @@ int input_init(input_parameter *param, int plugin_no) {
         case 30:
             // awb gain red
             sscanf(optarg, "%f", &tcp_params_ptr->cam_params.awb_gains_r);
+            LOG_ERROR("input_init: awb_gains_r= %f\n", tcp_params_ptr->cam_params.awb_gains_r);
             break;
         case 31:
             // awb gain blue
             sscanf(optarg, "%f", &tcp_params_ptr->cam_params.awb_gains_b);
+            LOG_ERROR("input_init: awb_gains_b= %f\n", tcp_params_ptr->cam_params.awb_gains_b);
             break;
         case 32:
             // blobyuv
@@ -732,10 +733,12 @@ static void encoder_buffer_callback(MMAL_PORT_T *port,
                 int64_t udp_comms_ping_age =
                             udp_comms_age_of_oldest_ping_response(&udp_comms);
                 uint8_t flag0 =
-                  pData->splitter_data_ptr->tcp_params.exposure_mode_is_frozen;
+                          pData->splitter_data_ptr->exposure_mode_is_frozen;
                 uint8_t flag1 = (udp_comms_connections > 0);
                 uint8_t flag2 = (udp_comms_ping_age > 2 * USECS_PER_SECOND);
-                uint8_t flags = flag2 << 2 | flag1 << 1 | flag0;
+                uint8_t flag3 =
+                          pData->splitter_data_ptr->tcp_params.test_img_enable;
+                uint8_t flags = flag3 << 3 | flag2 << 2 | flag1 << 1 | flag0;
 
                 pthread_mutex_lock(&pData->splitter_data_ptr->bbox_mutex);
                 overwrite_tif_tags(
@@ -860,8 +863,9 @@ static void camera_control_callback(MMAL_PORT_T *port,
                                 (MMAL_EVENT_PARAMETER_CHANGED_T*)buffer->data;
         switch (param->hdr.id) {
             case MMAL_PARAMETER_CAMERA_SETTINGS: {
-                Tcp_Params* tcp_params_ptr =
-                                 &data_ptr->splitter_data_ptr->tcp_params;
+                Splitter_Callback_Data* splitter_data_ptr =
+                                                data_ptr->splitter_data_ptr;
+                Tcp_Params* tcp_params_ptr = &splitter_data_ptr->tcp_params;
                 MMAL_PARAMETER_CAMERA_SETTINGS_T* sptr = &settings;
                 *sptr = *(MMAL_PARAMETER_CAMERA_SETTINGS_T*)param;
                 pthread_mutex_lock(&tcp_params_ptr->params_mutex);
@@ -891,26 +895,26 @@ static void camera_control_callback(MMAL_PORT_T *port,
                     if (analog_gain_is_wrong || digital_gain_is_wrong) {
                         // One or both gain measurements are incorrect.
 
-                        if (tcp_params_ptr->exposure_mode_is_frozen) {
+                        if (splitter_data_ptr->exposure_mode_is_frozen) {
                             // Unfreeze exposure mode to allow gains to adjust.
 
                             printf("unfreeze exposure mode\n");
                             raspicamcontrol_set_exposure_mode(
                                 data_ptr->camera_ptr,
                                 tcp_params_ptr->cam_params.exposureMode);
-                            tcp_params_ptr->exposure_mode_is_frozen = false;
+                            splitter_data_ptr->exposure_mode_is_frozen = false;
                         }
                     } else {
                         // Analog and digital gain measurements are correct.
 
-                        if (!tcp_params_ptr->exposure_mode_is_frozen) {
+                        if (!splitter_data_ptr->exposure_mode_is_frozen) {
                             // Freeze the exposure mode.
 
                             printf("freeze exposure mode\n");
                             raspicamcontrol_set_exposure_mode(
                                               data_ptr->camera_ptr,
                                               MMAL_PARAM_EXPOSUREMODE_OFF);
-                            tcp_params_ptr->exposure_mode_is_frozen = true;
+                            splitter_data_ptr->exposure_mode_is_frozen = true;
                         }
                     }
                 }

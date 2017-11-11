@@ -85,6 +85,54 @@ static inline float ntohf(float in) {
     return *(float*)&out;
 }
 
+static inline float htonf(float in) {
+    uint32_t* p = (uint32_t*)&in;
+    uint32_t out = htonl(*p);
+    return *(float*)&out;
+}
+
+static inline float htond(double in) {
+    int ii;
+    double out;
+    uint8_t* p_in = (uint8_t*)&in;
+    uint8_t* p_out = (uint8_t*)&out;
+    for (ii = 0; ii < 8; ++ii) {
+        p_out[ii] = p_in[7 - ii];
+    }
+    return out;
+}
+
+static void tcp_params_byte_swap(Tcp_Params* p) {
+    p->cam_params.sharpness = htonl(p->cam_params.sharpness);
+    p->cam_params.contrast = htonl(p->cam_params.contrast);
+    p->cam_params.brightness = htonl(p->cam_params.brightness);
+    p->cam_params.saturation = htonl(p->cam_params.saturation);
+    p->cam_params.ISO = htonl(p->cam_params.ISO);
+    p->cam_params.videoStabilisation = htonl(p->cam_params.videoStabilisation);
+    p->cam_params.exposureCompensation =
+                                    htonl(p->cam_params.exposureCompensation);
+    p->cam_params.exposureMode = htonl(p->cam_params.exposureMode);
+    p->cam_params.exposureMeterMode = htonl(p->cam_params.exposureMeterMode);
+    p->cam_params.awbMode = htonl(p->cam_params.awbMode);
+    p->cam_params.rotation = htonl(p->cam_params.rotation);
+    p->cam_params.hflip = htonl(p->cam_params.hflip);
+    p->cam_params.vflip = htonl(p->cam_params.vflip);
+    p->cam_params.roi.x = htond(p->cam_params.roi.x);
+    p->cam_params.roi.y = htond(p->cam_params.roi.y);
+    p->cam_params.roi.w = htond(p->cam_params.roi.w);
+    p->cam_params.roi.h = htond(p->cam_params.roi.h);
+    p->cam_params.shutter_speed = htonl(p->cam_params.shutter_speed);
+    p->cam_params.awb_gains_r = htonf(p->cam_params.awb_gains_r);
+    p->cam_params.awb_gains_b = htonf(p->cam_params.awb_gains_b);
+    p->cam_params.drc_level = htonl(p->cam_params.drc_level);
+    p->analog_gain_target = htonf(p->analog_gain_target);
+    p->analog_gain_tol = htonf(p->analog_gain_tol);
+    p->digital_gain_target = htonf(p->digital_gain_target);
+    p->digital_gain_tol = htonf(p->digital_gain_tol);
+    p->crosshairs_x = htonl(p->crosshairs_x);
+    p->crosshairs_y = htonl(p->crosshairs_y);
+}
+
 static void* connection_thread(void* void_args_ptr) {
 #define INT1    8
 #define INT2   12
@@ -104,6 +152,13 @@ static void* connection_thread(void* void_args_ptr) {
     char client_string[MAX_CLIENT_STRING];
     get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
                      client_string, MAX_CLIENT_STRING);
+
+    // Send tcp_params to GUI
+
+    Tcp_Params msg = *params_ptr;
+    LOG_ERROR("connection_thread_init: awb_gains= %f %f\n", params_ptr->cam_params.awb_gains_r, params_ptr->cam_params.awb_gains_b);
+    tcp_params_byte_swap(&msg);
+    send(client_ptr->fd, &msg, sizeof(Tcp_Params), 0);
 
     Raspicam_Char_Msg* char_msg_ptr = (Raspicam_Char_Msg*)mesg;
     Raspicam_Int_Msg* int_msg_ptr = (Raspicam_Int_Msg*)mesg;
@@ -231,6 +286,7 @@ static void* connection_thread(void* void_args_ptr) {
                                            camera_ptr,
                                            params_ptr->cam_params.awb_gains_r,
                                            params_ptr->cam_params.awb_gains_b);
+                LOG_ERROR("connection_thread: awb_gains= %f %f\n", params_ptr->cam_params.awb_gains_r, params_ptr->cam_params.awb_gains_b);
             }
             break;
         case RASPICAM_IMAGE_FX:
@@ -489,7 +545,8 @@ int tcp_params_construct(Tcp_Params* params_ptr) {
     params_ptr->analog_gain_tol = 10.0;
     params_ptr->digital_gain_target = -1.0;
     params_ptr->digital_gain_tol = 10.0;
-    params_ptr->exposure_mode_is_frozen = false;
+    params_ptr->crosshairs_x = 0;
+    params_ptr->crosshairs_y = 0;
     return 0;
 }
 
