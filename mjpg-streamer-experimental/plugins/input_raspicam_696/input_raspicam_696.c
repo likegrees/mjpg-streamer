@@ -898,7 +898,7 @@ static void camera_control_callback(MMAL_PORT_T *port,
                         if (splitter_data_ptr->exposure_mode_is_frozen) {
                             // Unfreeze exposure mode to allow gains to adjust.
 
-                            printf("unfreeze exposure mode\n");
+                            LOG_ERROR("unfreeze exposure mode\n");
                             raspicamcontrol_set_exposure_mode(
                                 data_ptr->camera_ptr,
                                 tcp_params_ptr->cam_params.exposureMode);
@@ -910,12 +910,22 @@ static void camera_control_callback(MMAL_PORT_T *port,
                         if (!splitter_data_ptr->exposure_mode_is_frozen) {
                             // Freeze the exposure mode.
 
-                            printf("freeze exposure mode\n");
+                            LOG_ERROR("freeze exposure mode\n");
                             raspicamcontrol_set_exposure_mode(
                                               data_ptr->camera_ptr,
                                               MMAL_PARAM_EXPOSUREMODE_OFF);
                             splitter_data_ptr->exposure_mode_is_frozen = true;
                         }
+                    }
+                } else {
+                    if (splitter_data_ptr->exposure_mode_is_frozen) {
+                        // Unfreeze exposure mode to allow gains to adjust.
+
+                        LOG_ERROR("unfreeze exposure mode\n");
+                        raspicamcontrol_set_exposure_mode(
+                            data_ptr->camera_ptr,
+                            tcp_params_ptr->cam_params.exposureMode);
+                        splitter_data_ptr->exposure_mode_is_frozen = false;
                     }
                 }
                 pthread_mutex_unlock(&tcp_params_ptr->params_mutex);

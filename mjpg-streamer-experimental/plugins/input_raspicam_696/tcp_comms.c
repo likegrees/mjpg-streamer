@@ -156,7 +156,6 @@ static void* connection_thread(void* void_args_ptr) {
     // Send tcp_params to GUI
 
     Tcp_Params msg = *params_ptr;
-    LOG_ERROR("connection_thread_init: awb_gains= %f %f\n", params_ptr->cam_params.awb_gains_r, params_ptr->cam_params.awb_gains_b);
     tcp_params_byte_swap(&msg);
     send(client_ptr->fd, &msg, sizeof(Tcp_Params), 0);
 
@@ -286,7 +285,6 @@ static void* connection_thread(void* void_args_ptr) {
                                            camera_ptr,
                                            params_ptr->cam_params.awb_gains_r,
                                            params_ptr->cam_params.awb_gains_b);
-                LOG_ERROR("connection_thread: awb_gains= %f %f\n", params_ptr->cam_params.awb_gains_r, params_ptr->cam_params.awb_gains_b);
             }
             break;
         case RASPICAM_IMAGE_FX:
@@ -560,6 +558,19 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
         LOG_ERROR("tcp_comms can't create socket, errno=%d; %s\n",
                   errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
         return -1;
+    }
+    const int true_flag = 1;
+    if (setsockopt(comms_ptr->server.fd, SOL_SOCKET, SO_REUSEADDR,
+                   &true_flag, sizeof(int)) < 0) {
+        LOG_ERROR(
+        "tcp_comms can't setsockopt(SO_REUSEADDR), errno=%d; %s; ignoring\n",
+                  errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
+    }
+    if (setsockopt(comms_ptr->server.fd, SOL_SOCKET, SO_REUSEPORT,
+                   &true_flag, sizeof(int)) < 0) {
+        LOG_ERROR(
+        "tcp_comms can't setsockopt(SO_REUSEPORT), errno=%d; %s; ignoring\n",
+                  errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
     }
 
     comms_ptr->server.saddr_len = sizeof(struct sockaddr_in);
