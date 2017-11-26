@@ -135,7 +135,7 @@ static int usestills = 0;
 static int wantPreview = 0;
 static int wantTimestamp = 0;
 static Splitter_Callback_Data splitter_callback_data;
-static Tcp_Comms tcp_comms;
+Tcp_Comms tcp_comms;
 static MMAL_PARAMETER_CAMERA_SETTINGS_T settings;
 static Udp_Comms udp_comms;
 
@@ -1324,6 +1324,14 @@ void help(void)
  ******************************************************************************/
 void *worker_thread(void *arg) {
     int i = 0;
+    MMAL_COMPONENT_T *camera = 0;
+
+#define DEFAULT_TCP_COMMS_PORT 10696
+    if (tcp_comms_construct(&tcp_comms, camera,
+                            &splitter_callback_data.tcp_params,
+                            DEFAULT_TCP_COMMS_PORT)) {
+        exit(EXIT_FAILURE);
+    }
 
     // Set cleanup handler to cleanup allocated resources.
 
@@ -1351,7 +1359,6 @@ void *worker_thread(void *arg) {
 
     //Camera variables
 
-    MMAL_COMPONENT_T *camera = 0;
     MMAL_COMPONENT_T *preview = 0;
     MMAL_ES_FORMAT_T *format;
     MMAL_STATUS_T status;
@@ -1495,13 +1502,6 @@ void *worker_thread(void *arg) {
     if (raspicamcontrol_set_all_parameters(
                       camera, &splitter_callback_data.tcp_params.cam_params)) {
         LOG_ERROR("can't raspicamcontrol_set_all_parameters\n");
-        exit(EXIT_FAILURE);
-    }
-
-#define DEFAULT_TCP_COMMS_PORT 10696
-    if (tcp_comms_construct(&tcp_comms, camera,
-                            &splitter_callback_data.tcp_params,
-                            DEFAULT_TCP_COMMS_PORT)) {
         exit(EXIT_FAILURE);
     }
 

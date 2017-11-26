@@ -47,6 +47,8 @@
  *     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#ifndef TCP_COMMS_H
+#define TCP_COMMS_H
 
 #include <stdbool.h>
 #include <sys/socket.h>
@@ -55,6 +57,7 @@
 #include "RaspiCamControl.h"
 
 typedef struct {
+    bool is_connected;
     int fd;
     struct sockaddr_storage saddr;
     socklen_t saddr_len;
@@ -78,10 +81,28 @@ typedef struct {
 } Tcp_Params;
 
 typedef struct {
+    Tcp_Host_Info client;
+    MMAL_COMPONENT_T* camera_ptr;
+    Tcp_Params* params_ptr;
+} Connection_Thread_Info;
+
+typedef struct {
     Tcp_Host_Info server;
     MMAL_COMPONENT_T* camera_ptr;
     Tcp_Params* params_ptr;
+    int connection_count;
+    Connection_Thread_Info* connection;
+    pthread_mutex_t connection_mutex;           /// mutual exclusion lock
 } Tcp_Comms;
+
+typedef enum { TEXT_COLOR_RED = 'r',
+               TEXT_COLOR_GREEN = 'g',
+               TEXT_COLOR_BLUE = 'b',
+               TEXT_COLOR_MAGENTA = 'm',
+               TEXT_COLOR_YELLOW = 'y',
+               TEXT_COLOR_CYAN = 'c',
+               TEXT_COLOR_ORANGE = 'o' } Text_Color;
+
 
 #define RASPICAM_QUIT                    0
 #define RASPICAM_SATURATION              1
@@ -140,3 +161,8 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
                         MMAL_COMPONENT_T* camera_ptr,
                         Tcp_Params* tcp_params_ptr,
                         unsigned short port_number);
+
+void tcp_comms_send_string(Tcp_Comms* comms_ptr,
+                           Text_Color color,
+                           const char* string);
+#endif

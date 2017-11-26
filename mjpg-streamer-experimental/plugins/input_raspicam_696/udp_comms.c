@@ -140,24 +140,17 @@ static int lookup_client_info(Udp_Comms* comms_ptr,
     }
     char ip_addr_str[INET6_ADDRSTRLEN+20];
     get_ip_addr_str(addr_ptr, ip_addr_str, INET6_ADDRSTRLEN+20);
-#ifdef OLD
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    int64_t cam_host_usec = timeval_diff_usecs(now,
-                                               comms_ptr->start_time);
-#else
     int64_t cam_host_usec = get_usecs();
-#endif
 
     if (comms_ptr->client_count >= MAX_CLIENTS) {
-        LOG_ERROR("at %.3f, too many hosts; can't add %s\n",
+        LOG_ERROR("at %.3f, too many udp clients; can't add %s\n",
                   cam_host_usec / (float)USECS_PER_SECOND, ip_addr_str);
         return -1;
     }
 
     /* Add a new client. */
 
-    LOG_STATUS("at %.3f, adding client_no %d: %s\n",
+    LOG_STATUS("at %.3f, adding upd client_no %d: %s\n",
                cam_host_usec / (float)USECS_PER_SECOND,
                comms_ptr->client_count, ip_addr_str);
 
@@ -202,16 +195,10 @@ ssize_t udp_comms_send(Udp_Comms* comms_ptr,
             char ip_addr_str[INET6_ADDRSTRLEN+20];
             get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
                             ip_addr_str, INET6_ADDRSTRLEN+20);
-#ifdef OLD
-            struct timeval now;
-            gettimeofday(&now, NULL);
-            int64_t cam_host_usec = timeval_diff_usecs(now,
-                                                       comms_ptr->start_time);
-#else
             int64_t cam_host_usec = get_usecs();
-#endif
+            printf("failed_sends=%d log_next_at=%d\n", client_ptr->failed_sends, client_ptr->log_next_at);
             LOG_ERROR(
-            "at %.3f, can't sendto client_no %d (%s) %d times; errno= %d\n",
+            "at %.3f, can't sendto udp client_no %d (%s) %d times; errno= %d\n",
                      cam_host_usec / (float)USECS_PER_SECOND,
                      client_no, client_ptr->log_next_at,
                      ip_addr_str, errno)
@@ -230,13 +217,7 @@ ssize_t udp_comms_send(Udp_Comms* comms_ptr,
  */
 static int send_request_time(Udp_Comms* comms_ptr, int client_no) {
     Request_Time msg_out;
-#ifdef OLD
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    int64_t usec = timeval_diff_usecs(now, comms_ptr->start_time);
-#else
     int64_t usec = get_usecs();
-#endif
 
     msg_out.msg_id = ID_REQUEST_TIME;
     msg_out.cam_host_usec = usec;
@@ -282,25 +263,18 @@ static int handle_echo_time(Udp_Comms* comms_ptr,
                                         client_ptr->sum_half_round_trip_usec /
                                         (client_ptr->sample_count * 2);
             if (client_ptr->sample_count == max_samples) {
-#ifdef OLD
-                struct timeval now;
-                gettimeofday(&now, NULL);
-                int64_t cam_host_usec = timeval_diff_usecs(
-                                                   now, comms_ptr->start_time);
-#else
                 int64_t cam_host_usec = get_usecs();
-#endif
                 int64_t client_msec = to_client_msecs(client_ptr,
                                                       cam_host_usec);
 
 
 #define MAX_ERRMSG 128
                 char errmsg[MAX_ERRMSG];
-                LOG_STATUS(
-"at %.3f, clock synched with client_no %d %s; client_secs= %.3f one-way= %lld usecs\n",
+                LOG_STATUS("at %.3f, clock synched udp client_no %d %s;\n",
                     cam_host_usec / (float)USECS_PER_SECOND, client_no,
                     get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
-                                    errmsg, MAX_ERRMSG),
+                                    errmsg, MAX_ERRMSG));
+                LOG_STATUS("client_secs= %.3f one-way= %lld usecs\n",
                     client_msec / (float)MSECS_PER_SECOND,
                     client_ptr->mean_half_round_trip_usec);
 
@@ -332,11 +306,6 @@ static int message_loop(Udp_Comms* comms_ptr,
 
     // Initialize remaining fields of *comms_ptr.
 
-#ifdef OLD
-    gettimeofday(&comms_ptr->start_time, NULL);
-    // Make sure start_time zero is way in the past.
-    comms_ptr->start_time.tv_sec -= 10;
-#endif
     comms_ptr->client_count = 0;
 
     // Open and bind the socket.
@@ -400,13 +369,7 @@ static int message_loop(Udp_Comms* comms_ptr,
         struct timeval timeout = { 1, 0 };
         int status = select(comms_ptr->fd+1, &set, NULL, NULL, &timeout);
         struct timeval arrival_time;
-#ifdef OLD
-        gettimeofday(&arrival_time, NULL);
-        int64_t arrive_usec = timeval_diff_usecs(arrival_time,
-                                                 comms_ptr->start_time);
-#else
         int64_t arrive_usec = get_usecs();
-#endif
         float timestamp = arrive_usec / (float)USECS_PER_SECOND;
         if (status == -1) {
             LOG_ERROR(
@@ -423,7 +386,7 @@ static int message_loop(Udp_Comms* comms_ptr,
                         (const struct sockaddr*)&comms_ptr->client[j].saddr,
                                     ip_addr_str, INET6_ADDRSTRLEN+20);
                     LOG_ERROR(
-             "at %.3f, clock sync with client_no %d %s timeout; resending\n",
+         "at %.3f, clock sync with udp client_no %d %s timeout; resending\n",
                               timestamp, j, ip_addr_str);
                 }
                 (void)send_request_time(comms_ptr, j);
@@ -458,7 +421,7 @@ static int message_loop(Udp_Comms* comms_ptr,
                  (const struct sockaddr*)&comms_ptr->client[client_no].saddr,
                                         ip_addr_str, INET6_ADDRSTRLEN+20);
                         LOG_ERROR(
-                        "at %.3f, unexpected message %d from client_no %d %s\n",
+                        "at %.3f, unexpected message %d udp client_no %d %s\n",
                                   timestamp, msg_in_buf[0], client_no,
                                   ip_addr_str);
                     }
@@ -491,34 +454,10 @@ static void* loop_start(void* void_args_ptr) {
 /**
  * Send the same message to all client_nos.
  */
-/*
-ssize_t udp_comms_send_to_all(Udp_Comms* comms_ptr,
-                              const void* buf,
-                              size_t len) {
-    bool some_success = false;
-    int ii;
-    pthread_mutex_lock(&comms_ptr->lock_mutex);
-    for (ii = 0; ii < comms_ptr->client_count; ++ii) {
-        if (sendto(comms_ptr->fd, buf, len, 0,
-                   (const struct sockaddr*)&comms_ptr->client[ii].saddr,
-                   comms_ptr->client[ii].saddr_len) == 0) {
-            some_success = true;
-        }
-    }
-    pthread_mutex_unlock(&comms_ptr->lock_mutex);
-    if (some_success) return 0;
-    return -1;
-}
-*/
+
 
 int64_t get_cam_host_usec(Udp_Comms* comms_ptr) {
-#ifdef OLD
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    return timeval_diff_usecs(now, comms_ptr->start_time);
-#else
     return get_usecs();
-#endif
 }
 
 ssize_t udp_comms_send_blobs_to_all(Udp_Comms* comms_ptr,
@@ -541,19 +480,13 @@ ssize_t udp_comms_send_blobs_to_all(Udp_Comms* comms_ptr,
         } else {
             ++client_ptr->failed_sends;
             if (client_ptr->failed_sends == client_ptr->log_next_at) {
-#ifdef OLD
-                struct timeval now;
-                gettimeofday(&now, NULL);
-                int64_t cam_host_usec = timeval_diff_usecs(now,
-                                                       comms_ptr->start_time);
-#else
                 int64_t cam_host_usec = get_usecs();
-#endif
                 char ip_addr_str[INET6_ADDRSTRLEN+20];
                 get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
                                 ip_addr_str, INET6_ADDRSTRLEN+20);
+                printf("failed_sends=%d log_next_at=%d\n", client_ptr->failed_sends, client_ptr->log_next_at);
                 LOG_ERROR(
-              "at %.3f, can't sendto client_no %d (%s) %d times; errno= %d\n",
+          "at %.3f, can't sendto udp client_no %d (%s) %d times; errno= %d\n",
                           cam_host_usec / (float)USECS_PER_SECOND,
                           client_no, ip_addr_str, client_ptr->log_next_at,
                           errno)

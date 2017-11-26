@@ -64,12 +64,6 @@
 #include "get_usecs.h"
 #include "mmal/mmal.h"
 
-typedef struct {
-    Tcp_Host_Info client;
-    MMAL_COMPONENT_T* camera_ptr;
-    Tcp_Params* params_ptr;
-} Connection_Thread_Info;
-
 
 static inline int_limit(int low, int high, int value) {
     return (value < low) ? low : (value > high) ? high : value;
@@ -152,12 +146,6 @@ static void* connection_thread(void* void_args_ptr) {
     char client_string[MAX_CLIENT_STRING];
     get_ip_addr_str((const struct sockaddr*)&client_ptr->saddr,
                      client_string, MAX_CLIENT_STRING);
-
-    // Send tcp_params to GUI
-
-    Tcp_Params msg = *params_ptr;
-    tcp_params_byte_swap(&msg);
-    send(client_ptr->fd, &msg, sizeof(Tcp_Params), 0);
 
     Raspicam_Char_Msg* char_msg_ptr = (Raspicam_Char_Msg*)mesg;
     Raspicam_Int_Msg* int_msg_ptr = (Raspicam_Int_Msg*)mesg;
@@ -459,6 +447,7 @@ static void* connection_thread(void* void_args_ptr) {
         }
     }
     if (errno == ECONNRESET) {
+        client_ptr->is_connected = false;
         LOG_ERROR("at %.3f, tcp client %s disconnected\n",
                   get_usecs() / (float)USECS_PER_SECOND, client_string);
     } else {
@@ -468,9 +457,30 @@ static void* connection_thread(void* void_args_ptr) {
                   get_usecs() / (float)USECS_PER_SECOND, client_string,
                   errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
     }
-    free(args_ptr);
     return NULL;
 }
+
+void tcp_comms_send_string(Tcp_Comms* comms_ptr,
+                           Text_Color color,
+                           const char* string) {
+    int ii;
+    pthread_mutex_lock(&comms_ptr->connection_mutex);
+    int connection_count = comms_ptr->connection_count;
+    pthread_mutex_unlock(&comms_ptr->connection_mutex);
+#define MAX_STRING 80
+    char msg[MAX_STRING + 1];
+    memset(msg, 0, MAX_STRING + 1);
+    msg[0] = color;
+    strncpy(&msg[1], string, MAX_STRING);
+    for (ii = 0; ii < connection_count; ++ii) {
+        if (comms_ptr->connection[ii].client.is_connected) {
+            send(comms_ptr->connection[ii].client.fd, msg,
+                 sizeof(msg), 0);
+        }
+    }
+}
+
+#define MAX_CONNECTIONS 256
 
 /**
  * Start up the message_loop().
@@ -484,8 +494,11 @@ static void* server_thread(void* void_args_ptr) {
 
     // We always keep around space for one unused client to work in.
 
-    Connection_Thread_Info* conn_args_ptr = (Connection_Thread_Info*)
-                                       malloc(sizeof(Connection_Thread_Info));
+    pthread_mutex_init(&comms_ptr->connection_mutex, NULL);
+    comms_ptr->connection_count = 0;
+    comms_ptr->connection = (Connection_Thread_Info*)
+                   malloc(MAX_CONNECTIONS * sizeof(Connection_Thread_Info));
+    Connection_Thread_Info* conn_args_ptr = &comms_ptr->connection[0];
     conn_args_ptr->client.saddr_len = sizeof(conn_args_ptr->client.saddr);
     while ((conn_args_ptr->client.fd =
                     accept(socket_fd,
@@ -496,8 +509,27 @@ static void* server_thread(void* void_args_ptr) {
         char client_string[MAX_CLIENT_STRING];
         conn_args_ptr->params_ptr = comms_ptr->params_ptr;
         conn_args_ptr->camera_ptr = comms_ptr->camera_ptr;
+        conn_args_ptr->client.is_connected = true;
         get_ip_addr_str((const struct sockaddr*)&conn_args_ptr->client.saddr,
                         client_string, MAX_CLIENT_STRING);
+        if (comms_ptr->connection_count >= MAX_CONNECTIONS) {
+            LOG_STATUS("at %.3f, no space for tcp connection from %s\n",
+                       timestamp, client_string);
+            continue;
+        }
+
+        // Send tcp_params to GUI
+
+        Tcp_Params msg = *conn_args_ptr->params_ptr;
+        tcp_params_byte_swap(&msg);
+        send(conn_args_ptr->client.fd, &msg, sizeof(Tcp_Params), 0);
+        
+        /* Log success, but first increment connection_count, so the new
+           connection sees the log message. */
+
+        pthread_mutex_lock(&comms_ptr->connection_mutex);
+        ++comms_ptr->connection_count;
+        pthread_mutex_unlock(&comms_ptr->connection_mutex);
         LOG_STATUS("at %.3f, new tcp connection from %s\n",
                    timestamp, client_string);
 
@@ -513,8 +545,7 @@ static void* server_thread(void* void_args_ptr) {
 
         // Make space for a new (unused) client.
 
-        conn_args_ptr = (Connection_Thread_Info*)
-                                       malloc(sizeof(Connection_Thread_Info));
+        conn_args_ptr = &comms_ptr->connection[comms_ptr->connection_count];
         conn_args_ptr->client.saddr_len = sizeof(conn_args_ptr->client.saddr);
     }
     free(conn_args_ptr);
@@ -560,12 +591,6 @@ int tcp_comms_construct(Tcp_Comms* comms_ptr,
         return -1;
     }
     const int true_flag = 1;
-    if (setsockopt(comms_ptr->server.fd, SOL_SOCKET, SO_REUSEADDR,
-                   &true_flag, sizeof(int)) < 0) {
-        LOG_ERROR(
-        "tcp_comms can't setsockopt(SO_REUSEADDR), errno=%d; %s; ignoring\n",
-                  errno, strerror_r(errno, errmsg, MAX_ERR_MSG));
-    }
     if (setsockopt(comms_ptr->server.fd, SOL_SOCKET, SO_REUSEPORT,
                    &true_flag, sizeof(int)) < 0) {
         LOG_ERROR(
