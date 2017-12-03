@@ -305,7 +305,7 @@ static void* connection_thread(void* void_args_ptr) {
             } else {
                 params_ptr->cam_params.rotation =
                                     int_limit(0, 359, ntohl(int_msg_ptr->int0));
-                raspicamcontrol_set_awb_mode(camera_ptr,
+                raspicamcontrol_set_rotation(camera_ptr,
                                              params_ptr->cam_params.rotation);
             }
             break;
@@ -571,9 +571,9 @@ int tcp_params_construct(Tcp_Params* params_ptr) {
     params_ptr->blob_yuv_max[1] = 0;
     params_ptr->blob_yuv_max[2] = 0;
     params_ptr->analog_gain_target = -1.0;
-    params_ptr->analog_gain_tol = 10.0;
+    params_ptr->analog_gain_tol = 0.1;
     params_ptr->digital_gain_target = -1.0;
-    params_ptr->digital_gain_tol = 10.0;
+    params_ptr->digital_gain_tol = 0.1;
     params_ptr->crosshairs_x = 0;
     params_ptr->crosshairs_y = 0;
     return 0;

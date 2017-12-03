@@ -235,11 +235,6 @@ int input_init(input_parameter *param, int plugin_no) {
         exit(EXIT_FAILURE);
     }
 
-    // TEMPORARY
-    // TODO: check for digital gain also
-    //splitter_callback_data.tcp_params.analog_gain_target = 2.5;
-    //splitter_callback_data.tcp_params.analog_gain_tol = 0.1;
-
     param->argv[0] = INPUT_PLUGIN_NAME;
     plugin_number = plugin_no;
 
@@ -427,12 +422,10 @@ int input_init(input_parameter *param, int plugin_no) {
         case 30:
             // awb gain red
             sscanf(optarg, "%f", &tcp_params_ptr->cam_params.awb_gains_r);
-            LOG_ERROR("input_init: awb_gains_r= %f\n", tcp_params_ptr->cam_params.awb_gains_r);
             break;
         case 31:
             // awb gain blue
             sscanf(optarg, "%f", &tcp_params_ptr->cam_params.awb_gains_b);
-            LOG_ERROR("input_init: awb_gains_b= %f\n", tcp_params_ptr->cam_params.awb_gains_b);
             break;
         case 32:
             // blobyuv
@@ -1326,13 +1319,6 @@ void *worker_thread(void *arg) {
     int i = 0;
     MMAL_COMPONENT_T *camera = 0;
 
-#define DEFAULT_TCP_COMMS_PORT 10696
-    if (tcp_comms_construct(&tcp_comms, camera,
-                            &splitter_callback_data.tcp_params,
-                            DEFAULT_TCP_COMMS_PORT)) {
-        exit(EXIT_FAILURE);
-    }
-
     // Set cleanup handler to cleanup allocated resources.
 
     pthread_cleanup_push(worker_cleanup, NULL);
@@ -1410,6 +1396,14 @@ void *worker_thread(void *arg) {
     if (!camera->output_num) {
         LOG_ERROR("camera has no output port\n");
         mmal_component_destroy(camera);
+        exit(EXIT_FAILURE);
+    }
+
+
+#define DEFAULT_TCP_COMMS_PORT 10696
+    if (tcp_comms_construct(&tcp_comms, camera,
+                            &splitter_callback_data.tcp_params,
+                            DEFAULT_TCP_COMMS_PORT)) {
         exit(EXIT_FAILURE);
     }
 
