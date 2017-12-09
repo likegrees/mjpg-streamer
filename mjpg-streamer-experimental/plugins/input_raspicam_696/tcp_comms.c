@@ -518,9 +518,38 @@ static void* server_thread(void* void_args_ptr) {
             continue;
         }
 
-        // Send tcp_params to GUI
+        // Recv tcp_params from GUI
 
-        Tcp_Params msg = *conn_args_ptr->params_ptr;
+        Tcp_Params msg;
+        int bytes = recv(conn_args_ptr->client.fd, &msg, sizeof(Tcp_Params), 0);
+        if (bytes == sizeof(Tcp_Params)) {
+            // GUI sent us tcp_params.  Use those values for selected fields.
+            
+            tcp_params_byte_swap(&msg);
+            conn_args_ptr->params_ptr->cam_params = msg.cam_params;
+            conn_args_ptr->params_ptr->test_img_enable = msg.test_img_enable;
+            conn_args_ptr->params_ptr->yuv_write = msg.yuv_write;
+            conn_args_ptr->params_ptr->jpg_write = msg.jpg_write;
+            conn_args_ptr->params_ptr->detect_yuv = msg.detect_yuv;
+            conn_args_ptr->params_ptr->blob_yuv_min[0] = msg.blob_yuv_min[0];
+            conn_args_ptr->params_ptr->blob_yuv_min[1] = msg.blob_yuv_min[1];
+            conn_args_ptr->params_ptr->blob_yuv_min[2] = msg.blob_yuv_min[2];
+            conn_args_ptr->params_ptr->blob_yuv_max[0] = msg.blob_yuv_max[0];
+            conn_args_ptr->params_ptr->blob_yuv_max[1] = msg.blob_yuv_max[1];
+            conn_args_ptr->params_ptr->blob_yuv_max[2] = msg.blob_yuv_max[2];
+            conn_args_ptr->params_ptr->analog_gain_target =
+                                                       msg.analog_gain_target;
+            conn_args_ptr->params_ptr->analog_gain_tol = msg.analog_gain_tol;
+            conn_args_ptr->params_ptr->digital_gain_target =
+                                                       msg.digital_gain_target;
+            conn_args_ptr->params_ptr->digital_gain_tol = msg.digital_gain_tol;
+            conn_args_ptr->params_ptr->crosshairs_x = msg.crosshairs_x;
+            conn_args_ptr->params_ptr->crosshairs_y = msg.crosshairs_y;
+        }
+
+        // Send tcp_params to GUI
+        
+        msg = *conn_args_ptr->params_ptr;
         tcp_params_byte_swap(&msg);
         send(conn_args_ptr->client.fd, &msg, sizeof(Tcp_Params), 0);
         
